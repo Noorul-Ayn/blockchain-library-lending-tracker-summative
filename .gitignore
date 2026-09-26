@@ -1,0 +1,20 @@
+# Build output
+build/
+library_tracker
+*.o
+*.d
+
+# Runtime state - NEVER commit these.
+# They contain password hashes, private signing keys and live lending data.
+data/users.db
+data/keys/
+data/chain.dat
+data/chain.dat.tmp
+*.pem
+*.key
+
+# Editor / OS clutter
+.vscode/
+.idea/
+*.swp
+.DS_Store

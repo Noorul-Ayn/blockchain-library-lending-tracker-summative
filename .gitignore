@@ -10,6 +10,8 @@ data/users.db
 data/keys/
 data/chain.dat
 data/chain.dat.tmp
+data/pending.dat
+data/pending.dat.tmp
 *.pem
 *.key
 

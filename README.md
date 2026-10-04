@@ -1,345 +1,416 @@
-# Blockchain Library Lending Tracker (C)
+# Blockchain Library Lending Tracker v2: Tokens and Mining (C)
 
-A command-line library lending system written in C. Every **borrow**, **return** and **overdue**
-event is stored as a block in a blockchain. Each block is linked by **SHA-256** hashes and
-**signed with ECDSA (P-256)** by the librarian who recorded it, so no past record can be quietly
-changed. For example, nobody can mark a lost book as "returned" without being caught.
+This is Formative 2. It extends the [Formative 1 lending tracker](https://github.com/Noorul-Ayn/blockchain-library-lending-tracker),
+which records every borrow and return as a signed, SHA-256-linked block. Version 2 adds:
 
----
+- **Token rewards**: returning a book creates a reward transaction (10 coins on time, 5 coins late,
+  nothing if the book is never returned).
+- **A pending pool**: every lending record and token transfer waits there, unconfirmed.
+- **Proof-of-work mining**: solo, pool and cloud miners confirm the pending pool. A block hash must
+  start with *difficulty* zero characters.
+- **Two ledger models**: UTXO and account-based. You pick one for each session, and both read the
+  same chain.
 
-## Features
-
-| Requirement | Where it is implemented |
-|---|---|
-| Blockchain data structure (blocks of lending records) | `include/blockchain.h`, `src/blockchain.c` |
-| Book + member registries loaded from `books.txt` / `members.txt` into arrays of structs | `src/registry.c` |
-| IDs validated before any lending action (`ERROR: Book or Member not found`) | `src/lending.c` |
-| SHA-256 hashing to link blocks | `src/crypto.c`, `block_compute_hash()` |
-| Digital signatures (ECDSA P-256) on every lending action | `src/crypto.c`, `seal_block()` |
-| Chain validation: hashes, `previous_hash` links, signatures | `chain_validate()` |
-| CLI to borrow, return and view records | `src/ui.c` |
-| Tamper detection demo | menu option 7 (and editing `chain.dat` directly) |
-| User authentication + role-based access control | `src/auth.c` |
-| File-based persistence (atomic writes) | `src/storage.c` |
-| Overdue detection (`OVERDUE` blocks) | `lending_mark_overdue()` |
+The full history of Formative 1 is kept in this repository, and the Formative 2 work is added on top of it.
 
 ---
 
-## Required libraries and dependencies
+## Contents
+
+1. [What changed from Formative 1](#1-what-changed-from-formative-1)
+2. [Required libraries and dependencies](#2-required-libraries-and-dependencies)
+3. [Compilation instructions](#3-compilation-instructions)
+4. [Running the program](#4-running-the-program)
+5. [How to switch between transaction models](#5-how-to-switch-between-transaction-models)
+6. [How to set the mining difficulty](#6-how-to-set-the-mining-difficulty)
+7. [How to test the mining simulations](#7-how-to-test-the-mining-simulations)
+8. [How lending connects to token transactions](#8-how-lending-connects-to-token-transactions)
+9. [The two transaction models](#9-the-two-transaction-models)
+10. [How mining confirms blocks](#10-how-mining-confirms-blocks)
+11. [Security](#11-security)
+12. [Data persistence](#12-data-persistence)
+13. [Design choices and assumptions](#13-design-choices-and-assumptions)
+14. [Automated tests](#14-automated-tests)
+15. [Project structure](#15-project-structure)
+
+---
+
+## 1. What changed from Formative 1
+
+| | Formative 1 | Formative 2 |
+|---|---|---|
+| When a block joins the chain | immediately | only after it has been **mined** from the pending pool |
+| Block fields | index, timestamp, book, member, action, previous_hash, signature, hash | the same fields **plus** `token_reward`, `tx_id`, `nonce`, `difficulty`, `mined_by`, `mined_at`, and the transaction itself |
+| Rewards | none | 10 coins (on time), 5 coins (late), 0 (not returned) |
+| Balances | none | UTXO model or account model |
+| Hash rule | any SHA-256 hash | the hash must start with *d* zeros (proof-of-work, *d* = 1–4) |
+| New menu options | none | pending pool, mining (solo, pool, cloud), difficulty setting, benchmark, balances, transfers, history |
+
+Everything from Formative 1 still works: registries, validation of IDs, ECDSA signatures, login and
+roles, chain validation and the tamper demo.
+
+---
+
+## 2. Required libraries and dependencies
 
 | Dependency | Why | Ubuntu package |
 |---|---|---|
-| GCC (C11) and GNU Make | compile and build | `build-essential` |
-| OpenSSL libcrypto (1.1.1 or 3.x) | SHA-256, ECDSA, AES-256, PBKDF2, secure random numbers | `libssl-dev` |
-| Python 3 *(optional)* | only used by one attack-simulation test | `python3` |
-
-Install everything on Ubuntu / Debian:
+| GCC (C11) and GNU Make | building | `build-essential` |
+| OpenSSL libcrypto 1.1.1 or 3.x | SHA-256, ECDSA, AES-256, PBKDF2, random numbers | `libssl-dev` |
+| C maths library `libm` | the `pow()` and `ceil()` functions used by the mining statistics (part of glibc) | already installed |
+| Python 3 *(optional)* | used only by one attack-simulation test | `python3` |
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential libssl-dev
 ```
 
+There are no other new dependencies.
+
 ---
 
-## Compilation instructions
+## 3. Compilation instructions
 
 ```bash
-git clone https://github.com/Noorul-Ayn/blockchain-library-lending-tracker.git
-cd blockchain-library-lending-tracker
-make
+git clone https://github.com/Noorul-Ayn/blockchain-library-lending-tracker-v2.git
+cd blockchain-library-lending-tracker-v2
+make            # builds ./library_tracker  (zero warnings with -Wall -Wextra -Wpedantic)
+make test       # runs the 104 automated checks
 ```
-
-This produces the executable `./library_tracker`. The code compiles with
-`-std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2` and produces **zero warnings**.
-
-Other build targets:
 
 | Command | What it does |
 |---|---|
 | `make` | build `./library_tracker` |
-| `make run` | build and start the program |
-| `make test` | build and run the 71 automated end-to-end tests |
-| `make debug` | build with AddressSanitizer + UndefinedBehaviorSanitizer |
-| `make clean` | delete build output |
+| `make run` | build and start |
+| `make test` | run `tests/run_tests.sh` |
+| `make debug` | build with AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make clean` | remove build output |
 
-Manual compile without Make:
+To compile without Make:
 
 ```bash
-gcc -std=c11 -Wall -Wextra -Iinclude -D_POSIX_C_SOURCE=200809L src/*.c -o library_tracker -lcrypto
+gcc -std=c11 -Wall -Wextra -Iinclude -D_POSIX_C_SOURCE=200809L src/*.c -o library_tracker -lcrypto -lm
 ```
 
 ---
 
-## How to build and run the application
+## 4. Running the program
 
 ```bash
-make
-./library_tracker                 # uses the data/ folder
-./library_tracker -d /path/to/dir # use a different data folder
+./library_tracker                       # asks for the model at start-up, difficulty 2
+./library_tracker --model utxo          # UTXO model
+./library_tracker --model account -D 3  # account model, difficulty 3
 ./library_tracker --help
 ```
 
-### First run
+| Option | Meaning |
+|---|---|
+| `-m`, `--model utxo\|account` | token ledger model for this session (if omitted, a menu asks) |
+| `-D`, `--difficulty 1-4` | proof-of-work difficulty (default 2) |
+| `-d`, `--data-dir DIR` | data folder (default `data/`) |
 
-1. The program loads `data/books.txt` and `data/members.txt`. If either file is missing or empty,
-   it prints an error and exits.
-2. No accounts exist yet, so it asks you to **create the administrator account**. A personal
-   ECDSA key pair is generated and the private key is encrypted with your password.
-3. You log in with that account.
-4. The **genesis block** (index 0, `previous_hash` = 64 zeros) is created, signed and saved.
-5. The whole chain is validated, and then the main menu appears:
+| Environment variable | Meaning |
+|---|---|
+| `LIBRARY_LOAN_PERIOD=SECONDS` | loan period before a return counts as **late** (default 14 days). Use `30` for demos. |
+| `LIBRARY_SEED=N` | fixed random seed for pool miners' hash rates, for reproducible runs |
+| `NO_COLOR=1` | turn off coloured output |
+
+**First run:** the program creates the administrator account and an ECDSA key pair, then mines the
+genesis block (`previous_hash` = 64 zeros).
+
+**Main menu:**
 
 ```
- MAIN MENU   user: admin [ADMIN]   blocks: 1   chain: VALID
-  1. Borrow a book
-  2. Return a book
-  3. View lending records (blockchain)
-  4. View books & members (registries)
-  5. Mark overdue loans
-  6. Validate blockchain
-  7. Tamper detection demo
-  8. Add user account
-  0. Logout and exit
+ MAIN MENU   user: admin [ADMIN]   model: UTXO   difficulty: 2
+             chain: 6 block(s) VALID   pending pool: 2 block(s)
+  LENDING                         BLOCKCHAIN & MINING
+   1. Borrow a book                4. View pending pool
+   2. Return a book (+ reward)     5. Mine pending pool (solo / pool / cloud)
+   3. Mark overdue loans           6. View confirmed lending records
+                                   7. Validate blockchain
+  TOKENS                           8. Set mining difficulty (1-4)
+  10. View balances / UTXO set     9. Difficulty benchmark
+  11. Transfer tokens
+  12. Member transaction history   OTHER
+                                  13. View books & members
+                                  14. Tamper detection demo
+                                  15. Add user account
+   0. Logout and exit
 ```
 
-### Passwords
+---
 
-Passwords need 8 or more characters and must include at least one letter and one digit.
-You get three login attempts before the program exits.
+## 5. How to switch between transaction models
 
-### Demonstrating overdue loans
+The model is chosen **once per session** and applies to every token transaction in that session.
+There are two ways to choose it:
 
-The default loan period is 14 days. To demo overdue detection quickly, shorten it
-(the value is in seconds):
+1. **Start-up menu.** Run `./library_tracker` without `--model` and pick `1` (UTXO) or `2` (account).
+2. **Command-line option.** Run `./library_tracker --model utxo` or `./library_tracker --model account`.
+
+To switch, log out (option `0`) and start the program again with the other model. Balances are never
+stored in a separate file. At start-up the program **replays every confirmed transaction on the chain**
+into the chosen model, so both models always show the same balances for the same chain, just organised
+differently. The menu header shows which model is active.
+
+---
+
+## 6. How to set the mining difficulty
+
+Difficulty is the number of leading `0` hex characters the block hash must have. It ranges from 1 to 4,
+and the default is 2.
+
+- **At start-up:** `./library_tracker -D 3`
+- **During a session:** menu option `8`, then enter a number from 1 to 4.
+
+Each extra zero makes mining about **16 times harder**:
+
+| Difficulty | Hash must start with | Expected attempts (16^d) |
+|---|---|---|
+| 1 | `0` | 16 |
+| 2 | `00` | 256 |
+| 3 | `000` | 4,096 |
+| 4 | `0000` | 65,536 |
+
+Option `9` (**difficulty benchmark**) mines 20 sample blocks at each difficulty and shows the
+average, minimum and maximum attempts and the time taken. Each block stores the difficulty it was mined
+at, and validation checks that its hash really meets it.
+
+---
+
+## 7. How to test the mining simulations
+
+### Quick manual walkthrough (about 3 minutes)
 
 ```bash
-LIBRARY_LOAN_PERIOD=30 ./library_tracker
+rm -rf data/chain.dat data/pending.dat data/users.db data/keys    # start clean
+LIBRARY_LOAN_PERIOD=30 ./library_tracker --model utxo
 ```
 
-Borrow a book, wait 30 seconds, then choose **5. Mark overdue loans**.
+1. **Create pending records:** `1` BK001 ALU001 (borrow), `2` BK001 ALU001 (on-time return, +10),
+   `1` BK002 ALU002, `1` BK003 ALU003.
+2. **View them:** option `4` lists 4 unconfirmed blocks. Option `10` shows every balance still at 0.
+3. **Solo mining:** `5` then `1`. Each block shows its nonce, hash attempts and hash, and the full
+   UTXO set is printed after every confirmed block. ALU001 now owns a 9-coin UTXO (10 − 1 fee).
+4. **Late return:** wait 30 seconds, then `3` (mark overdue) and `2` BK002 ALU002 (late, +5).
+   BK003 stays overdue and creates **no** transaction.
+5. **Pool mining:** `5` then `2`, then press Enter for 4 miners. A table shows each miner's hash rate,
+   attempts, share % and reward after the 2% pool fee.
+6. **Transfer with change:** `11` ALU001 → ALU002, 3 coins, Enter (automatic inputs). This spends the
+   9-coin UTXO: 3 coins go to ALU002, 5 coins come back as change, and the miner gets a 1-coin fee.
+7. **Cloud mining:** `5` then `3`, then 5 rounds. Each round shows the reward, the maintenance fee
+   (10%), the rental fee (15), cumulative totals and net profit. A warning appears once fees exceed rewards.
+8. **Difficulty:** `8` then `4`, then `5` `3` `1`. A single rented round rarely finds a block at
+   difficulty 4, so the block stays pending and the rental is unprofitable. Option `9` shows why.
 
----
+### Edge cases the brief asks for
 
-## Registry file formats
-
-`data/books.txt` has one book per line: `book_id,title,author`
-
-```
-BK001,Things Fall Apart,Chinua Achebe
-BK002,Americanah,Chimamanda Ngozi Adichie
-BK003,The River Between,Ngũgĩ wa Thiong'o
-```
-
-`data/members.txt` has one member per line: `member_id,full_name,course_code`
-
-```
-ALU001,John Doe,BLK101
-ALU002,Jane Smith,BLK101
-ALU003,Amara Diallo,BLK101
-```
-
-Blank lines and lines starting with `#` are ignored. Invalid lines are reported with their line
-number and skipped. This covers duplicate IDs, missing fields, over-long values, and the `|`
-character, which is reserved as the chain file delimiter.
-
----
-
-## How the blockchain works
-
-### Block structure
-
-| Field | Type | Description |
+| Edge case | How to trigger it | Expected result |
 |---|---|---|
-| `index` | `int` | position in the chain (0 = genesis) |
-| `timestamp` | `time_t` | Unix time the block was created |
-| `book_id` | `char[20]` | must exist in the book registry |
-| `book_title` | `char[80]` | copied from the registry at transaction time |
-| `member_id` | `char[20]` | must exist in the member registry |
-| `member_name` | `char[50]` | copied from the registry at transaction time |
-| `action` | `char[10]` | `BORROWED`, `RETURNED` or `OVERDUE` (`GENESIS` for block 0) |
-| `previous_hash` | `char[65]` | SHA-256 of the previous block |
-| `signature` | `unsigned char[72]` | ECDSA P-256 signature (DER) of the block data |
-| `signature_len` | `size_t` | number of bytes used in `signature` (DER length varies from 70 to 72) |
-| `signed_by` | `char[20]` | staff user whose key signed the block |
-| `hash` | `char[65]` | SHA-256 of all of the above |
+| Book not returned gives no transaction | `3` mark overdue | `OVERDUE` block with token_reward 0 and no tx_id; balance unchanged |
+| Insufficient balance (UTXO) | `11`, amount larger than the balance | `REJECTED (insufficient funds): inputs total X but amount + fee = Y` |
+| Double spend (UTXO) | `11` twice with the same input before mining, or pick a `SPENT` output | `REJECTED (double spend)` |
+| Insufficient balance (account) | run with `--model account`, then `11` | `REJECTED (insufficient funds)` |
+| Wrong or reused nonce (account) | `11`, then enter a nonce other than the one shown as "next expected" | `REJECTED (invalid nonce): nonce N was already used / is out of order` |
+| Unprofitable cloud rental | `5` `3` with an empty pool, or at difficulty 4 | `WARNING: rental is unprofitable after round N` |
 
-The first ten fields are exactly those in the specification. `signature_len` and `signed_by`
-are added because they are needed to verify a variable-length signature against the right
-public key.
+### Automated
 
-### Hashing and signing
-
-```
-payload   = index|timestamp|book_id|book_title|member_id|member_name|action|previous_hash|signed_by
-signature = ECDSA_P256_Sign( SHA-256(payload) )          using the librarian's private key
-hash      = SHA-256( payload | hex(signature) )
-```
-
-### Validation (menu option 6)
-
-For every block, the program checks:
-
-1. **Structure**: the index equals the block's position and the action is legal there.
-2. **Hash**: the recomputed SHA-256 equals the stored `hash`.
-3. **Link**: `previous_hash` equals the previous block's `hash` (64 zeros for genesis).
-4. **Signature**: the ECDSA signature verifies with the signer's public key.
-
-The chain is also validated automatically **at start-up** and **before every write**.
-A tampered chain can still be viewed, but no new records can be added to it.
-
-### Lending rules
-
-- **Borrow**: both IDs must be registered, and the book must not already be on loan.
-- **Return**: the program looks up the book's most recent `BORROWED` entry. If there is none
-  (never borrowed, or already returned), it prints an error. The member returning the book must
-  be the member who borrowed it.
-- **Overdue**: loans older than the loan period get an `OVERDUE` block. The book can still be
-  returned afterwards.
-
-A book's current status is **derived from the chain itself**. No separate "status" table exists
-that could be edited.
+`make test` runs every scenario above and more (see [section 14](#14-automated-tests)).
 
 ---
 
-## Security mechanisms
+## 8. How lending connects to token transactions
 
-| Mechanism | Details |
-|---|---|
-| Hash chain | SHA-256 over every field; each block stores the previous block's hash |
-| Digital signatures | ECDSA on curve P-256 (prime256v1), SHA-256 digest, one key pair **per user** |
-| Private key protection | encrypted PKCS#8 PEM: PBES2 / PBKDF2-HMAC-SHA256 (600,000 iterations) + AES-256-CBC; file mode `0600`, `keys/` folder mode `0700` |
-| Password storage | PBKDF2-HMAC-SHA256, 600,000 iterations, random 16-byte salt per user; plain text never stored |
-| Login | constant-time hash comparison; same work done for unknown usernames (no user enumeration); 3 attempts; 1 s delay after a failure; typed passwords are not shown |
-| Key possession check | after login, the unlocked private key signs a random challenge that must verify with the stored public key |
-| Access control | `LIBRARIAN` may borrow, return, view and validate; `ADMIN` may also add users and run the tamper demo |
-| Memory hygiene | passwords and hashes are wiped with `OPENSSL_cleanse`; the signing key is freed at logout |
-| Input validation | IDs limited to `[A-Za-z0-9_-]`, lengths checked (never silently truncated), `|` and control characters rejected, usernames restricted, which blocks path traversal through a forged `signed_by` |
-| Build hardening | `-fstack-protector-strong`, `_FORTIFY_SOURCE=2` |
+| Lending event | Transaction created | `token_reward` | Member receives after confirmation |
+|---|---|---|---|
+| Borrow | none | 0 | nothing |
+| Return **on time** | REWARD, LIBRARY → member, 10 coins | 10 | **9** (10 − 1-coin fee) |
+| Return **late** (after the loan period, or already marked OVERDUE) | REWARD, LIBRARY → member, 5 coins | 5 | **4** |
+| Mark **overdue** (not returned) | none | 0 | nothing |
+| Token transfer | TRANSFER, member → member | 0 | recipient gets the amount; the sender also pays the 1-coin fee |
 
-**Why signatures matter:** someone with write access to `chain.dat` could edit a block and
-recompute every hash with a short script. Hashes alone would not catch that. They cannot produce
-valid signatures without the librarian's private key, so the forgery is still detected. Every
-signature covers `previous_hash`, so all re-linked later blocks fail too.
-(`tests/forge_chain.py` performs exactly this attack in the test suite.)
-
-`users.db`, `keys/` and `chain.dat` are listed in `.gitignore` and are **never committed**.
+The transaction travels inside the block, and its SHA-256 hash is stored in `tx_id`. The librarian's
+ECDSA signature covers `token_reward` and `tx_id`, so the reward amount cannot be changed later.
+**Nothing is credited until the block is mined.** Until then the record sits in the pending pool and
+every balance is unchanged.
 
 ---
 
-## Data persistence
+## 9. The two transaction models
 
-All state lives in the data folder (`data/` by default):
+### UTXO model (`--model utxo`)
+
+- Every confirmed transaction creates **outputs**. A reward creates one output for the member
+  (amount − fee). A transfer creates `vout 0` for the recipient and `vout 1` with the **change** back
+  to the sender.
+- A transfer **spends whole previous outputs as its inputs**. You can choose them yourself (for example
+  `1,2`) or press Enter for automatic oldest-first selection.
+- The transfer is **rejected** if the inputs don't cover amount + fee.
+- A member's **balance = the sum of their unspent outputs**.
+- **Double spending is blocked** in three places:
+  1. an output that has already been spent is refused;
+  2. an output already used by a pending transaction is reserved and can't be used again;
+  3. replaying the chain re-checks every input.
+- After **every confirmed block**, the full UTXO set is printed, showing each output, its owner, amount
+  and the block that created it.
+
+### Account model (`--model account`)
+
+- Each member is an **account** holding a balance and a **nonce**. A confirmed block debits and
+  credits balances directly.
+- A transfer must use the sender's next nonce, which is the account nonce plus the number of transfers
+  already pending. A **reused or out-of-order nonce is rejected**, and so is a transfer the balance
+  can't cover.
+- Each account keeps a **transaction history as a linked list** in memory. Each node records the
+  sender, recipient, amount, fee, nonce and block. Option `12` prints it for any member.
+
+### Comparison
+
+| | UTXO | Account-based |
+|---|---|---|
+| What is stored | individual coins (outputs) | one balance per member |
+| Balance | computed: sum of unspent outputs | read directly |
+| Spending | whole outputs as inputs, plus change | debit the balance |
+| Double-spend / replay protection | an output can be spent only once | the nonce must increase by exactly 1 |
+| History | follow outputs from one transaction to the next | linked list per account |
+| Strengths | easy to verify in parallel; good privacy | simple, compact, intuitive |
+| Used by | Bitcoin | Ethereum |
+
+---
+
+## 10. How mining confirms blocks
+
+1. Every borrow, return, overdue mark or transfer is **signed** by the logged-in librarian and placed in
+   the **pending pool** (`data/pending.dat`), in order.
+2. The miner takes the pending blocks one at a time and links each to the chain tip by setting its
+   `index` and `previous_hash`.
+3. **Proof-of-work:** starting from nonce 0, the miner computes
+   `hash = SHA-256(index | record | signature | previous_hash | difficulty | mined_by | mined_at | nonce)`
+   and keeps incrementing the nonce until the hash starts with *difficulty* zeros. The number of
+   attempts is reported.
+4. `library_confirm()` re-checks the signature and the transaction, **applies the transaction to the
+   ledger** (this is when balances change), appends the block to `chain.dat` and removes it from
+   `pending.dat`. A pending record that fails these checks (for example a tampered signature, or a
+   double spend) is **rejected** and removed.
+
+### Mining approaches
+
+Reward per confirmed block = **20 coins + the block's transaction fee**.
+
+| | How the work is done | How the reward is paid |
+|---|---|---|
+| **Solo** | one miner tries nonces 0, 1, 2, … | the miner receives the full reward |
+| **Pool** | 2–8 miners, each with a random hash rate of 100–600 attempts per round, search separate nonce ranges (miner *k* starts at *k* × 2^40). The first to find a valid hash wins the block, and every miner is credited with the work it did up to that moment. | 2% pool fee first, then `share = miner_attempts / total_attempts`, `reward = share × (gross − pool fee)` |
+| **Cloud** | the user rents 600 attempts per round for 1–5 rounds. A block can be mined across several rounds. | each round: reward credited minus a 10% maintenance fee; a 15-coin rental fee is paid every round. The summary shows gross earnings, total fees and net profit, with a warning whenever cumulative fees exceed cumulative rewards. |
+
+---
+
+## 11. Security
+
+Everything from Formative 1 is kept:
+
+- SHA-256 hash chain
+- ECDSA P-256 signatures, with one key pair per user
+- encrypted PKCS#8 private keys (600,000 PBKDF2 iterations, AES-256), with `0600` / `0700` permissions
+- salted PBKDF2 password hashes
+- role-based access control
+- input validation and atomic saves
+
+New in Formative 2:
+
+- **Proof-of-work:** rewriting a block means redoing its proof-of-work **and that of every later block**.
+  Option `14` → `4` performs exactly this rewrite and reports how many hash attempts it took.
+- **Transaction integrity:** `tx_id` must equal SHA-256(transaction), and the reward must match the
+  action. Tampering is detected at validation.
+- **Signatures still decide:** even a fully re-mined chain is detected, because the edited record's
+  ECDSA signature no longer verifies. `tests/forge_chain.py` performs this attack.
+- **Ledger replay:** validation (option `7`) also replays every transaction to prove there are no
+  double spends, overspending or bad nonces anywhere in history.
+- **Pending records** are signature-checked before mining, so a tampered pending record is rejected.
+
+---
+
+## 12. Data persistence
 
 | File | Contents |
 |---|---|
-| `books.txt`, `members.txt` | registries (committed to Git) |
-| `chain.dat` | the blockchain, one block per line (human-readable) |
-| `users.db` | usernames, roles, salts and PBKDF2 password hashes (`0600`) |
-| `keys/<user>.key` | encrypted private signing key (`0600`) |
-| `keys/<user>.pub` | public verification key |
+| `data/chain.dat` | confirmed blocks, one per line (format v2, 18 fields including `token_reward`, `tx_id`, the transaction, `difficulty` and `nonce`) |
+| `data/pending.dat` | the pending pool, in the same format; survives restarts |
+| `data/users.db`, `data/keys/` | accounts and encrypted signing keys (never committed) |
 
-The chain is written **atomically**: to `chain.dat.tmp`, then `fsync()`, then `rename()`.
-A crash can never leave a half-written chain. If saving fails, the new block is also removed
-from memory, so memory and disk always agree.
-
----
-
-## Error handling
-
-- Every function returns a `Status` code (`include/common.h`), and callers check it.
-- Missing or empty registries produce a clear error and exit code `1`.
-- A corrupted `chain.dat` (wrong format) is refused with the line number and reason (exit code `2`).
-  A well-formed but **tampered** chain is loaded read-only and reported as tampered.
-- Failed login gives exit code `3`.
-- All user input is length-checked. Over-long input, EOF (Ctrl+D) and invalid menu choices are
-  handled without crashing.
-- Checked with AddressSanitizer, UndefinedBehaviorSanitizer and Valgrind (0 errors, 0 leaks).
+Both files are saved **atomically** (temporary file, `fsync()`, `rename()`). If the program stops
+between saving the chain and saving the pool, it removes the duplicate pending record on the next start.
+Balances are never stored; they are rebuilt from the chain at start-up. A Formative 1 (`v1`) chain
+file is recognised and reported clearly.
 
 ---
 
-## Tamper detection demo
+## 13. Design choices and assumptions
 
-**Inside the program (admin only): option 7.** Pick a block and choose an attack:
-
-1. change the action (for example, mark a `BORROWED` book as `RETURNED`)
-2. change the member name
-3. change the action **and recompute the hash** (cover-up attempt)
-4. delete the block
-
-The program re-validates and shows exactly which check fails, then restores the original chain.
-The file on disk is never modified by this demo.
-
-**By editing the file directly:**
-
-```bash
-cp data/chain.dat /tmp/chain.backup      # keep a copy
-nano data/chain.dat                      # change e.g. "John Doe" to "Jane Smith" on one line
-./library_tracker                        # start-up warns: validation FAILED; option 6 shows details
-cp /tmp/chain.backup data/chain.dat      # restore
-```
-
----
-
-## Testing
-
-```bash
-make test
-```
-
-The script `tests/run_tests.sh` runs **71 checks** against the real binary. They cover missing and
-empty registries, valid and invalid IDs, lending rules, persistence across restarts, file
-permissions, key encryption, login lock-out, role-based access, every in-program tamper mode,
-external file edits, a full hash-recomputation forgery, a corrupted file, a path-traversal
-attempt and overdue handling.
+- **One record per block.** This keeps the Formative 1 block structure, as the brief asks. Mining the
+  pool confirms each pending record as its own proof-of-work block, in order.
+- **"Late" means** the return happened after the loan period (14 days by default) or the book had
+  already been marked OVERDUE.
+- **Rewards are issued by `LIBRARY`.** They work like a coinbase transaction, with no inputs. The
+  1-coin fee is deducted before the member is credited.
+- **Fees and mining rewards go to miners.** Miners are not library members, so their earnings are
+  reported by each mining run and not added to member balances. The ledger accounts are the member IDs
+  from the registry, as required.
+- **The librarian signs transfers on the member's behalf.** Members don't have keys of their own,
+  so the logged-in staff member's ECDSA key signs the record.
+- **Both models read the same chain.** Transactions are stored in a model-neutral form. UTXO inputs
+  are stored when the transfer was made under the UTXO model; for account-model transfers they are
+  chosen when the chain is replayed.
+- **Fixed economic constants:** block reward 20, transaction fee 1, pool fee 2%, cloud power 600
+  attempts per round, rental 15, maintenance 10%. They are all defined in `include/common.h`.
+- **Difficulty is a session setting.** Each block records the difficulty it was mined at, and
+  validation checks it.
 
 ---
 
-## Project structure
+## 14. Automated tests
 
-```
-.
-├── Makefile
-├── README.md
-├── data/
-│   ├── books.txt              # book registry
-│   └── members.txt            # member registry
-├── docs/
-│   ├── architecture.md        # system design diagrams (rendered by GitHub)
-│   └── diagrams/              # the same diagrams as PNG images
-├── include/                   # public headers (one per module)
-│   ├── common.h   util.h   registry.h   crypto.h   auth.h
-│   ├── keyring.h  blockchain.h   storage.h   lending.h   ui.h
-├── src/
-│   ├── main.c         # start-up sequence
-│   ├── ui.c           # menus and output
-│   ├── lending.c      # borrow / return / overdue rules
-│   ├── blockchain.c   # blocks, hashing, signing, validation
-│   ├── storage.c      # chain.dat load / atomic save
-│   ├── registry.c     # books.txt / members.txt
-│   ├── auth.c         # accounts, login, access control
-│   ├── keyring.c      # public key cache for verification
-│   ├── crypto.c       # OpenSSL wrappers
-│   └── util.c         # strings, input, hex, time, paths
-└── tests/
-    ├── run_tests.sh       # end-to-end test suite
-    └── forge_chain.py     # attack simulation used by the tests
-```
+`make test` runs **104 checks** against the real program:
 
-See [`docs/architecture.md`](docs/architecture.md) for the system design diagrams.
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
+| Area | Checks |
 |---|---|
-| `openssl/evp.h: No such file or directory` | `sudo apt install libssl-dev` |
-| `ERROR: books.txt is missing` | run from the project root, or pass `-d path/to/data` |
-| `chain.dat is corrupted` | restore your backup, or delete `data/chain.dat` to start a new chain |
-| Forgot the admin password | delete `data/users.db`, `data/keys/` and `data/chain.dat` to start over |
-| No colours / odd symbols | run with `NO_COLOR=1` |
+| Registries and command-line options | missing or empty files, invalid lines, bad `--model` and `--difficulty` |
+| Pending pool | records wait unconfirmed, survive a restart and are confirmed by mining; genesis hash meets the difficulty |
+| Rewards | on-time 10 (credited 9), late 5 (credited 4), overdue gives no transaction, nothing credited before mining |
+| UTXO | change output, reserved-output double spend, spent-output double spend, insufficient inputs, UTXO set after every block |
+| Account | same balances as UTXO, reused nonce, out-of-order nonce, insufficient balance, pending nonces, linked-list history |
+| Mining | solo attempts and reward, pool table with 2% fee and shares totalling 100%, cloud summary, unprofitable warning, difficulty 1–4, benchmark |
+| Security | key permissions and encryption, lock-out, librarian access denied |
+| Tampering | in-memory demo (5 attacks), edited chain file, inflated reward, fully re-mined forgery, tampered pending record, v1 file, path traversal |
+
+Memory safety: no errors under AddressSanitizer, UndefinedBehaviorSanitizer and Valgrind (0 bytes in
+use at exit, including every linked-list history node).
 
 ---
 
-**Author:** Noorul-Ayn · [github.com/Noorul-Ayn](https://github.com/Noorul-Ayn)
+## 15. Project structure
+
+```
+include/  src/
+  common.h                 constants (rewards, fees, difficulty, pool and cloud settings)
+  transaction.h/.c         REWARD / TRANSFER transactions, tx_id = SHA-256(tx)     [new]
+  utxo.h/.c                UTXO set, inputs, change, double-spend checks           [new]
+  account.h/.c             accounts, nonces, linked-list history                   [new]
+  ledger.h/.c              selects the UTXO or account model                       [new]
+  mining.h/.c              solo, pool and cloud mining; difficulty benchmark       [new]
+  blockchain.h/.c          block layout, proof-of-work, signing, validation        [updated]
+  lending.h/.c             borrow / return / overdue, rewards, transfers, confirm  [updated]
+  storage.h/.c             chain.dat and pending.dat (format v2)                   [updated]
+  ui.h/.c, main.c          menus, tables, start-up                                 [updated]
+  registry, auth, keyring, crypto, util                                            [Formative 1]
+data/        books.txt, members.txt
+docs/        architecture.md, diagrams/*.png
+tests/       run_tests.sh (104 checks), forge_chain.py (re-mining attack)
+```
+
+Design diagrams: [`docs/architecture.md`](docs/architecture.md).
+
+---
+
+**Author:** Hauwa Muhammad Bello ([Noorul-Ayn](https://github.com/Noorul-Ayn)), Blockchain Development, Individual Formative 2

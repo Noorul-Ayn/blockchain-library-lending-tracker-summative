@@ -1,47 +1,64 @@
 #!/usr/bin/env python3
 """
-Attack simulation used by run_tests.sh.
+Attack simulation used by run_tests.sh (chain format v2, with proof-of-work).
 
-Edits one block of chain.dat and then RECOMPUTES the SHA-256 hash of that
-block and of every block after it, re-linking previous_hash values so that
-hash and link checks all pass. This models a skilled attacker with write
-access to the file but WITHOUT the librarian's private key.
+Edits one confirmed block of chain.dat (the borrower's name) and then
+RE-MINES that block and every block after it: it re-links previous_hash,
+searches for a new nonce that satisfies the block's difficulty and stores
+the new hash. This models an attacker with write access to the file and
+enough computing power, but WITHOUT the librarian's private key.
 
-The program must still detect the forgery because the ECDSA signature of
-the edited block no longer verifies.
+Hashes, links and proof-of-work all look valid afterwards; the program must
+still detect the forgery because the ECDSA signature of the edited record
+no longer verifies.
 
-usage: forge_chain.py CHAIN_FILE BLOCK_INDEX NEW_ACTION
+usage: forge_chain.py CHAIN_FILE BLOCK_INDEX NEW_MEMBER_NAME
 """
 import hashlib
 import sys
 
-# Column order in chain.dat
-IDX, TS, BOOK_ID, TITLE, MEMBER_ID, MEMBER_NAME, ACTION, SIGNED_BY, PREV, SIG, HASH = range(11)
+# Column order in chain.dat (v2)
+(IDX, TS, BOOK_ID, TITLE, MEMBER_ID, MEMBER_NAME, ACTION, REWARD, TX_ID, TX, SIGNED_BY,
+ SIG, DIFFICULTY, NONCE, MINED_BY, MINED_AT, PREV, HASH) = range(18)
 
 
-def block_hash(f):
-    # Must mirror block_payload() + block_compute_hash() in src/blockchain.c
-    payload = "|".join([f[IDX], f[TS], f[BOOK_ID], f[TITLE], f[MEMBER_ID],
-                        f[MEMBER_NAME], f[ACTION], f[PREV], f[SIGNED_BY]])
-    return hashlib.sha256((payload + "|" + f[SIG]).encode("utf-8")).hexdigest()
+def header_prefix(f):
+    """Mirrors record_payload() + header_prefix() in src/blockchain.c."""
+    record = "|".join([f[TS], f[BOOK_ID], f[TITLE], f[MEMBER_ID], f[MEMBER_NAME], f[ACTION],
+                       f[REWARD], f[TX_ID], f[SIGNED_BY]])
+    return "|".join([f[IDX], record, f[SIG], f[PREV], f[DIFFICULTY], f[MINED_BY],
+                     f[MINED_AT]]) + "|"
+
+
+def mine(f):
+    prefix = header_prefix(f).encode()
+    target = "0" * int(f[DIFFICULTY])
+    nonce = 0
+    while True:
+        h = hashlib.sha256(prefix + str(nonce).encode()).hexdigest()
+        if h.startswith(target):
+            f[NONCE], f[HASH] = str(nonce), h
+            return nonce + 1
+        nonce += 1
 
 
 def main():
-    path, target, new_action = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    path, target, new_name = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().splitlines()
-
     header = [l for l in lines if l.startswith("#")]
     blocks = [l.split("|") for l in lines if l and not l.startswith("#")]
 
-    blocks[target][ACTION] = new_action
+    blocks[target][MEMBER_NAME] = new_name
+    attempts = 0
     for i in range(target, len(blocks)):
         if i > 0:
             blocks[i][PREV] = blocks[i - 1][HASH]
-        blocks[i][HASH] = block_hash(blocks[i])
+        attempts += mine(blocks[i])
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(header + ["|".join(b) for b in blocks]) + "\n")
+    print(f"re-mined {len(blocks) - target} block(s) with {attempts} attempts")
 
 
 if __name__ == "__main__":

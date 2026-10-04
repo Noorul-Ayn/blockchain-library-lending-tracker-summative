@@ -15,7 +15,7 @@ OBJ_DIR  := build
 CPPFLAGS += -I$(INC_DIR) -D_POSIX_C_SOURCE=200809L -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
 CFLAGS   ?= -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
             -Wstrict-prototypes -Wmissing-prototypes -fstack-protector-strong
-LDLIBS   += -lcrypto
+LDLIBS   += -lcrypto -lm
 
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)

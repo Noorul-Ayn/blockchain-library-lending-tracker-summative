@@ -37,6 +37,10 @@ const char *status_str(Status status)
     case LT_ERR_ON_LOAN:       return "book is already on loan";
     case LT_ERR_NOT_ON_LOAN:   return "book is not on loan";
     case LT_ERR_WRONG_MEMBER:  return "book is on loan to another member";
+    case LT_ERR_INSUFFICIENT:  return "insufficient balance";
+    case LT_ERR_DOUBLE_SPEND:  return "double spend";
+    case LT_ERR_NONCE:         return "incorrect or reused nonce";
+    case LT_ERR_POOL_EMPTY:    return "the pending pool is empty";
     }
     return "unknown error";
 }
@@ -281,8 +285,55 @@ int is_hex_string(const char *s, size_t expected_len)
 }
 
 /* ------------------------------------------------------------------------ */
+/* Pseudo-random numbers (xorshift64*)                                      */
+/* Used only to simulate miner hash rates; never for anything secret.       */
+/* ------------------------------------------------------------------------ */
+
+static unsigned long long g_rng_state = 0x9E3779B97F4A7C15ULL;
+
+void rng_seed(unsigned long long seed)
+{
+    g_rng_state = seed ? seed : 0x9E3779B97F4A7C15ULL;
+}
+
+/** Uses $env_name as the seed if it is set (reproducible tests), else time. */
+void rng_seed_from_env_or_time(const char *env_name)
+{
+    const char *value = getenv(env_name);
+
+    if (value != NULL && value[0] != '\0')
+        rng_seed(strtoull(value, NULL, 10));
+    else
+        rng_seed((unsigned long long)time(NULL) ^ ((unsigned long long)getpid() << 32));
+}
+
+static unsigned long long rng_next(void)
+{
+    g_rng_state ^= g_rng_state >> 12;
+    g_rng_state ^= g_rng_state << 25;
+    g_rng_state ^= g_rng_state >> 27;
+    return g_rng_state * 0x2545F4914F6CDD1DULL;
+}
+
+unsigned long rng_range(unsigned long lo, unsigned long hi)
+{
+    if (hi <= lo)
+        return lo;
+    return lo + (unsigned long)(rng_next() % (unsigned long long)(hi - lo + 1));
+}
+
+/* ------------------------------------------------------------------------ */
 /* Time, paths and files                                                    */
 /* ------------------------------------------------------------------------ */
+
+/** Monotonic clock in milliseconds (for timing proof-of-work). */
+double now_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
 
 void format_time(time_t t, char *buf, size_t cap)
 {

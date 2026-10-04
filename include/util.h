@@ -43,7 +43,13 @@ void hex_encode(const unsigned char *in, size_t len, char *out);
 int  hex_decode(const char *hex, unsigned char *out, size_t cap, size_t *out_len);
 int  is_hex_string(const char *s, size_t expected_len);
 
+/* ---- Pseudo-random numbers (mining simulation only, not cryptographic) -- */
+void          rng_seed(unsigned long long seed);
+void          rng_seed_from_env_or_time(const char *env_name);
+unsigned long rng_range(unsigned long lo, unsigned long hi);   /* inclusive */
+
 /* ---- Time, paths, files ------------------------------------------------- */
+double now_ms(void);
 void format_time(time_t t, char *buf, size_t cap);
 void format_duration(long seconds, char *buf, size_t cap);
 int  path_join(char *out, size_t cap, const char *dir, const char *name);

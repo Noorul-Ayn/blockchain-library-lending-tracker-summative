@@ -5,15 +5,18 @@ library_tracker
 *.d
 
 # Runtime state - NEVER commit these.
-# They contain password hashes, private signing keys and live lending data.
+# They contain password hashes, private signing keys, the key vault and
+# live lending data. They are re-created by the program.
 data/users.db
 data/keys/
 data/chain.dat
-data/chain.dat.tmp
 data/pending.dat
-data/pending.dat.tmp
+data/state.dat
+data/*.tmp
+demo_data/
 *.pem
 *.key
+*.vault
 
 # Editor / OS clutter
 .vscode/

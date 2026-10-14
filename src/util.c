@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 static int g_use_color = 0;
+static long g_clock_offset = 0;   /* simulated time (advance_clock), seconds */
 
 /* ------------------------------------------------------------------------ */
 /* Status codes                                                             */
@@ -34,12 +35,12 @@ const char *status_str(Status status)
     case LT_ERR_AUTH:          return "authentication failed";
     case LT_ERR_DENIED:        return "access denied";
     case LT_ERR_CHAIN_INVALID: return "blockchain failed validation";
-    case LT_ERR_ON_LOAN:       return "book is already on loan";
-    case LT_ERR_NOT_ON_LOAN:   return "book is not on loan";
-    case LT_ERR_WRONG_MEMBER:  return "book is on loan to another member";
-    case LT_ERR_INSUFFICIENT:  return "insufficient balance";
+    case LT_ERR_STATE:         return "not allowed in the copy's current state";
+    case LT_ERR_LIMIT:         return "limit reached";
+    case LT_ERR_INSUFFICIENT:  return "insufficient funds";
     case LT_ERR_DOUBLE_SPEND:  return "double spend";
-    case LT_ERR_NONCE:         return "incorrect or reused nonce";
+    case LT_ERR_NONCE:         return "invalid nonce";
+    case LT_ERR_SIGNATURE:     return "invalid signature";
     case LT_ERR_POOL_EMPTY:    return "the pending pool is empty";
     }
     return "unknown error";
@@ -380,4 +381,136 @@ int file_exists(const char *path)
 {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Simulated library clock                                                  */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * All lending logic (due dates, overdue detection, fines, block timestamps)
+ * reads the time through lib_now(). An administrator can move this clock
+ * forward with advance_clock so that day-based rules can be demonstrated
+ * without waiting real days. The offset is saved in state.dat.
+ */
+time_t lib_now(void)
+{
+    return time(NULL) + (time_t)g_clock_offset;
+}
+
+long clock_offset(void)
+{
+    return g_clock_offset;
+}
+
+void clock_set_offset(long seconds)
+{
+    g_clock_offset = seconds < 0 ? 0 : seconds;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Dates and numbers                                                        */
+/* ------------------------------------------------------------------------ */
+
+void format_date(time_t t, char *buf, size_t cap)
+{
+    struct tm tm_buf;
+
+    if (t <= 0) {
+        snprintf(buf, cap, "-");
+        return;
+    }
+    if (localtime_r(&t, &tm_buf) == NULL || strftime(buf, cap, "%Y-%m-%d", &tm_buf) == 0)
+        snprintf(buf, cap, "%lld", (long long)t);
+}
+
+/**
+ * Parses a calendar date written as YYYY-MM-DD. The result is the last second
+ * of that day (local time), which is how due dates are stored.
+ * Rejects malformed strings and impossible dates such as 2026-02-30.
+ */
+int parse_date(const char *s, time_t *out)
+{
+    struct tm tm_buf;
+    int y, m, d;
+    char extra;
+
+    if (s == NULL || strlen(s) != 10 || s[4] != '-' || s[7] != '-' ||
+        sscanf(s, "%4d-%2d-%2d%c", &y, &m, &d, &extra) != 3)
+        return -1;
+    if (y < 1970 || y > 2999 || m < 1 || m > 12 || d < 1 || d > 31)
+        return -1;
+    memset(&tm_buf, 0, sizeof tm_buf);
+    tm_buf.tm_year = y - 1900;
+    tm_buf.tm_mon = m - 1;
+    tm_buf.tm_mday = d;
+    tm_buf.tm_hour = 23;
+    tm_buf.tm_min = 59;
+    tm_buf.tm_sec = 59;
+    tm_buf.tm_isdst = -1;
+    *out = mktime(&tm_buf);
+    /* mktime normalises 2026-02-30 into March; reject that. */
+    if (*out == (time_t)-1 || tm_buf.tm_mday != d || tm_buf.tm_mon != m - 1)
+        return -1;
+    return 0;
+}
+
+int parse_long(const char *s, long min, long max, long *out)
+{
+    char *end;
+    long v;
+
+    if (s == NULL || *s == '\0')
+        return -1;
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || *end != '\0' || v < min || v > max)
+        return -1;
+    *out = v;
+    return 0;
+}
+
+/** Days (rounded up) from `from` to `to`; 0 if `to` is not after `from`. */
+long days_between_ceil(time_t from, time_t to)
+{
+    long diff = (long)(to - from);
+
+    if (diff <= 0)
+        return 0;
+    return (diff + DAY_SECONDS - 1) / DAY_SECONDS;
+}
+
+/**
+ * Splits a command line into words in place. Words are separated by spaces
+ * or tabs; a word may be wrapped in double quotes to include spaces.
+ * @return the number of words (at most max_words are stored).
+ */
+size_t split_args(char *line, char **words, size_t max_words)
+{
+    size_t count = 0;
+    char *p = line;
+
+    while (*p != '\0') {
+        char *start;
+
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0')
+            break;
+        if (*p == '"') {
+            start = ++p;
+            while (*p != '\0' && *p != '"')
+                p++;
+        } else {
+            start = p;
+            while (*p != '\0' && *p != ' ' && *p != '\t')
+                p++;
+        }
+        if (*p != '\0')
+            *p++ = '\0';
+        if (count < max_words)
+            words[count] = start;
+        count++;
+    }
+    return count;
 }

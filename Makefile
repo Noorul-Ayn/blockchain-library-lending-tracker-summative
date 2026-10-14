@@ -1,4 +1,4 @@
-# Blockchain Library Lending Tracker - build file
+# Blockchain Library Lending Tracker (summative) - build file
 #
 #   make          build ./library_tracker
 #   make run      build and run

@@ -56,4 +56,16 @@ int  path_join(char *out, size_t cap, const char *dir, const char *name);
 int  ensure_dir(const char *path, mode_t mode);
 int  file_exists(const char *path);
 
+/* ---- Simulated library clock ------------------------------------------- */
+time_t lib_now(void);              /* real time + administrator clock offset */
+long   clock_offset(void);
+void   clock_set_offset(long seconds);
+
+/* ---- Dates, numbers and command words ----------------------------------- */
+void   format_date(time_t t, char *buf, size_t cap);      /* YYYY-MM-DD     */
+int    parse_date(const char *s, time_t *out);             /* 0 on success  */
+int    parse_long(const char *s, long min, long max, long *out);
+long   days_between_ceil(time_t from, time_t to);
+size_t split_args(char *line, char **words, size_t max_words);
+
 #endif /* LT_UTIL_H */

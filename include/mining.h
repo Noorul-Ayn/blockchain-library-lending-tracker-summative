@@ -1,18 +1,24 @@
 /**
  * @file mining.h
- * @brief Mining simulations that confirm the pending pool (Formative 2).
+ * @brief Proof-of-work mining of the pending pool: solo, pool and cloud.
  *
- * All three approaches use the same proof-of-work (pow_scan) and the same
- * confirmation step (library_confirm), so a block mined by a solo miner,
- * a pool or a rented cloud miner is indistinguishable on the chain apart
- * from its mined_by field.
+ * All three approaches use the same block assembly (library_assemble_block:
+ * the top N requests of the prioritised pool), the same proof-of-work
+ * (pow_scan: increment the nonce, recompute SHA-256 until the hash starts
+ * with `difficulty` zeros) and the same confirmation step
+ * (library_commit_block), so a block mined by a solo miner, a pool or a
+ * rented cloud miner differs on the chain only in its sealed_by field.
  *
- * Reward per confirmed block = BLOCK_REWARD + the block's transaction fee.
- *   Solo  : the single miner receives everything.
- *   Pool  : 2% pool fee first, the rest shared by
+ * Mining reward per confirmed block = block_reward + every fee in the block
+ * (1 coin per reward output and per token transaction).
+ *   Solo  : the single miner receives the full reward.
+ *   Pool  : a 2% pool fee is deducted first; the rest is shared by
  *           (miner_attempts / total_attempts) x reward.
- *   Cloud : the renter pays CLOUD_RENTAL_FEE per round; rewards are
- *           credited each round minus CLOUD_MAINTENANCE_PERCENT.
+ *   Cloud : the renter pays a fixed rental fee per round (1-5 rounds); the
+ *           rewards of blocks found with the rented hash power are credited
+ *           each round, minus a maintenance percentage.
+ * Miners are simulated nodes, not library members, so mining rewards are
+ * reported but not paid into member balances.
  */
 #ifndef LT_MINING_H
 #define LT_MINING_H
@@ -20,43 +26,46 @@
 #include <stddef.h>
 
 #include "common.h"
-#include "lending.h"
-
-/** Called after every confirmed block (UI prints it and the ledger). */
-typedef void (*BlockConfirmedFn)(void *ctx, Library *lib, const Block *block,
-                                 unsigned long long attempts, double elapsed_ms,
-                                 const char *found_by);
-
-/** Called when a pending block is rejected during mining. */
-typedef void (*BlockRejectedFn)(void *ctx, const Block *block, const char *reason);
+#include "library.h"
 
 typedef struct {
-    BlockConfirmedFn on_confirmed;
-    BlockRejectedFn  on_rejected;
-    void            *ctx;
+    /** A block was assembled from the pool and is about to be mined. */
+    void (*on_assembled)(void *ctx, const Library *lib, const Block *candidate,
+                         const AssemblyReport *report);
+    /** A block was mined and confirmed. after = requests discarded afterwards. */
+    void (*on_confirmed)(void *ctx, Library *lib, const Block *block,
+                         unsigned long long attempts, double elapsed_ms,
+                         const char *found_by, const AssemblyReport *after);
+    /** A mined block failed confirmation (should not happen). */
+    void (*on_rejected)(void *ctx, const Block *block, const char *reason);
+    void *ctx;
 } MiningCallbacks;
 
 typedef struct {
     size_t             blocks_confirmed;
     size_t             blocks_rejected;
+    size_t             records_confirmed;
     unsigned long long attempts;
     double             elapsed_ms;
-    long               fees;            /* transaction fees collected        */
-    double             gross_reward;    /* BLOCK_REWARD x blocks + fees      */
+    long               fees;             /* transaction fees collected        */
+    double             gross_reward;     /* block_reward x blocks + fees      */
+    AssemblyReport     last_assembly;    /* why mining stopped                */
 } MiningSummary;
 
-/* ---- Solo ---------------------------------------------------------------- */
-Status mine_solo(Library *lib, const char *miner_id, const MiningCallbacks *cb,
-                 MiningSummary *summary);
+/* ---- Solo ------------------------------------------------------------------ */
 
-/* ---- Pool ---------------------------------------------------------------- */
+/** Mines blocks until nothing minable is left (max_blocks = 0) or max_blocks. */
+Status mine_solo(Library *lib, const char *miner_id, size_t max_blocks,
+                 const MiningCallbacks *cb, MiningSummary *summary);
+
+/* ---- Pool ------------------------------------------------------------------ */
 typedef struct {
     char               id[MINER_ID_LEN];
-    unsigned long      hash_rate;       /* attempts per round (random)       */
-    unsigned long long attempts;        /* total hashes computed             */
+    unsigned long      hash_rate;        /* attempts per round (random)       */
+    unsigned long long attempts;         /* total hashes computed             */
     int                blocks_found;
-    double             share;           /* attempts / total_attempts         */
-    double             reward;          /* share x (gross - pool fee)        */
+    double             share;            /* attempts / total_attempts         */
+    double             reward;           /* share x (gross - pool fee)        */
 } PoolMiner;
 
 typedef struct {
@@ -68,22 +77,22 @@ typedef struct {
     MiningSummary summary;
 } PoolResult;
 
-Status mine_pool(Library *lib, size_t miner_count, const MiningCallbacks *cb,
-                 PoolResult *result);
+Status mine_pool(Library *lib, size_t miner_count, size_t max_blocks,
+                 const MiningCallbacks *cb, PoolResult *result);
 
-/* ---- Cloud --------------------------------------------------------------- */
+/* ---- Cloud ----------------------------------------------------------------- */
 typedef struct {
     int                round;
     unsigned long long attempts;
     int                blocks;
-    double             reward;          /* gross reward earned this round    */
-    double             maintenance;     /* % of this round's reward          */
-    double             rental;          /* fixed fee per round               */
-    double             credited;        /* reward - maintenance              */
+    double             reward;           /* gross reward earned this round    */
+    double             maintenance;      /* % of this round's reward          */
+    double             rental;           /* fixed fee per round               */
+    double             credited;         /* reward - maintenance              */
     double             cum_reward;
-    double             cum_fees;        /* rental + maintenance so far       */
-    double             net;             /* cum_reward - cum_fees             */
-    int                unprofitable;    /* cum_fees > cum_reward             */
+    double             cum_fees;         /* rental + maintenance so far       */
+    double             net;              /* cum_reward - cum_fees             */
+    int                unprofitable;     /* cum_fees > cum_reward             */
 } CloudRound;
 
 typedef struct {
@@ -102,21 +111,18 @@ typedef struct {
 Status mine_cloud(Library *lib, int rounds, const char *renter, const MiningCallbacks *cb,
                   CloudResult *result);
 
-/* ---- Difficulty benchmark ------------------------------------------------ */
+/* ---- Difficulty benchmark ---------------------------------------------------- */
 typedef struct {
     int                difficulty;
     int                trials;
     double             avg_attempts;
     unsigned long long min_attempts;
     unsigned long long max_attempts;
-    double             expected;        /* 16^difficulty                     */
+    double             expected;         /* 16^difficulty                     */
     double             avg_ms;
 } BenchRow;
 
-/** Mines `trials` sample blocks at each difficulty 1..MAX_DIFFICULTY. */
+/** Mines `trials` throw-away blocks at each difficulty 1..MAX_DIFFICULTY. */
 Status mining_benchmark(int trials, BenchRow rows[MAX_DIFFICULTY]);
-
-/** Reward for one confirmed block (block reward + its transaction fee). */
-double mining_block_reward(const Block *block);
 
 #endif /* LT_MINING_H */

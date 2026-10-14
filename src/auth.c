@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include "crypto.h"
+#include "keystore.h"
 #include "util.h"
 
 #define USER_FIELD_COUNT  5
@@ -257,7 +258,8 @@ static Status append_user_line(const char *data_dir, const UserRecord *user)
 }
 
 Status auth_create_user(const char *data_dir, const char *username,
-                        const char *password, Role role)
+                        const char *password, Role role,
+                        const unsigned char vault_key[32])
 {
     char keys_dir[LT_PATH_MAX], private_path[LT_PATH_MAX], public_path[LT_PATH_MAX];
     UserRecord user;
@@ -294,10 +296,18 @@ Status auth_create_user(const char *data_dir, const char *username,
     if (st == LT_OK)
         st = crypto_generate_keypair(private_path, public_path, password);
     if (st == LT_OK) {
-        st = append_user_line(data_dir, &user);
+        st = vault_wrap_for_user(data_dir, username, password, vault_key);
+        if (st == LT_OK)
+            st = append_user_line(data_dir, &user);
         if (st != LT_OK) { /* roll back so no orphaned keys remain */
+            char vault_file[LT_PATH_MAX];
             unlink(private_path);
             unlink(public_path);
+            if (path_join(vault_file, sizeof vault_file, keys_dir, username) == 0 &&
+                strlen(vault_file) + 7 < sizeof vault_file) {
+                strcat(vault_file, ".vault");
+                unlink(vault_file);
+            }
         }
     }
     crypto_wipe(&user, sizeof user);
@@ -355,6 +365,13 @@ Status auth_login(const char *data_dir, const char *username,
         goto done;
     }
 
+    /* The same password also unwraps the member key vault. */
+    if (vault_unwrap(data_dir, user.username, password, session->vault_key) != LT_OK) {
+        crypto_wipe(session->vault_key, sizeof session->vault_key);
+        st = LT_ERR_CRYPTO;
+        goto done;
+    }
+    session->vault_unlocked = 1;
     (void)str_copy(session->username, sizeof session->username, user.username);
     session->role = user.role;
     session->signing_key = private_key;
@@ -370,7 +387,7 @@ done:
 void auth_logout(Session *session)
 {
     EVP_PKEY_free(session->signing_key);
-    memset(session, 0, sizeof *session);
+    crypto_wipe(session, sizeof *session);
 }
 
 int auth_is_logged_in(const Session *session)
@@ -385,23 +402,25 @@ int auth_is_logged_in(const Session *session)
 /**
  * Role/permission matrix:
  *
- *   permission            LIBRARIAN  ADMIN
- *   view records              yes     yes
- *   record lending            yes     yes
- *   validate chain            yes     yes
- *   tamper demo                no     yes
- *   manage users               no     yes
+ *   permission                          LIBRARIAN  ADMIN
+ *   view registries, chain, pool           yes      yes
+ *   lending, registration, mining          yes      yes
+ *   validate / save / load chain           yes      yes
+ *   approve / reject suspicious requests    no      yes
+ *   clock, tamper demo, replay simulation   no      yes
+ *   manage staff accounts                   no      yes
  */
 int auth_has_permission(const Session *session, Permission perm)
 {
     if (!auth_is_logged_in(session))
         return 0;
     switch (perm) {
-    case PERM_VIEW_RECORDS:
-    case PERM_RECORD_LENDING:
-    case PERM_VALIDATE_CHAIN:
+    case PERM_VIEW:
+    case PERM_LENDING:
+    case PERM_VALIDATE:
         return session->role == ROLE_LIBRARIAN || session->role == ROLE_ADMIN;
-    case PERM_TAMPER_DEMO:
+    case PERM_REVIEW_FRAUD:
+    case PERM_ADMIN_TOOLS:
     case PERM_MANAGE_USERS:
         return session->role == ROLE_ADMIN;
     }

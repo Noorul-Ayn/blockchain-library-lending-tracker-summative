@@ -1,0 +1,373 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Report diagrams</title>
+<style>
+  :root {
+    --ink: #1f2430; --muted: #5a6170; --navy: #1F3864; --blue: #2F5496;
+    --box: #EEF3FB; --box-b: #8EA9DB;
+    --new: #FCE4D6; --new-b: #C55A11;
+    --pend: #FFF4CE; --pend-b: #BF9000;
+    --ok: #E2EFDA; --ok-b: #548235;
+    --err: #FBE5E5; --err-b: #C00000;
+    --grey: #F3F4F6; --grey-b: #A6A6A6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; font-family: Carlito, Calibri, sans-serif; color: var(--ink); }
+  section { position: relative; width: 760px; padding: 18px; background: #fff; margin-bottom: 40px; font-size: 14.5px; line-height: 1.3; }
+  .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 12.5px; }
+  .box { position: relative; z-index: 2; border: 1.6px solid var(--box-b); background: var(--box); border-radius: 6px; padding: 7px 10px; text-align: center; }
+  .box b { color: var(--navy); }
+  .new { background: var(--new); border-color: var(--new-b); }
+  .pend { background: var(--pend); border-color: var(--pend-b); }
+  .ok { background: var(--ok); border-color: var(--ok-b); }
+  .err { background: var(--err); border-color: var(--err-b); }
+  .grey { background: var(--grey); border-color: var(--grey-b); }
+  .row { display: flex; gap: 14px; justify-content: center; align-items: stretch; }
+  .col { display: flex; flex-direction: column; gap: 14px; }
+  .gap { height: 34px; }
+  .gap-s { height: 24px; }
+  .small { font-size: 12.5px; color: var(--muted); }
+  .pill { display: inline-block; font-size: 10.5px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; vertical-align: 1px; letter-spacing: .3px; }
+  .pill.n { background: var(--new-b); color: #fff; }
+  .pill.p { background: var(--navy); color: #fff; }
+  svg.arrows { position: absolute; left: 0; top: 0; z-index: 1; overflow: visible; pointer-events: none; }
+  .lbl { position: absolute; z-index: 3; background: #fff; color: var(--muted); font-size: 12.5px; padding: 0 4px; white-space: nowrap; transform: translate(-50%, -50%); }
+  .zero { color: var(--new-b); font-weight: bold; }
+  /* class cards */
+  .card { position: relative; z-index: 2; border: 1.6px solid var(--box-b); border-radius: 6px; background: #fff; overflow: hidden; }
+  .card > .hd { background: var(--navy); color: #fff; font-weight: bold; padding: 5px 10px; font-size: 15px; }
+  .card > .hd span { font-weight: normal; font-size: 12.5px; opacity: .85; margin-left: 6px; }
+  .card table { border-collapse: collapse; width: 100%; }
+  .card td { padding: 2.2px 10px; border-top: 1px solid #E3E8F1; white-space: nowrap; }
+  .card td.t { color: var(--blue); width: 1%; }
+  .card tr.hl td { background: #FDF0E7; }
+  .card .note { padding: 6px 10px; font-size: 12.5px; color: var(--muted); border-top: 1px solid #E3E8F1; background: #FAFBFD; white-space: normal; }
+  .legend { font-size: 12.5px; color: var(--muted); margin-top: 10px; text-align: center; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin: 0 4px 0 12px; border: 1.4px solid; }
+  .title { font-weight: bold; color: var(--navy); font-size: 15px; text-align: center; margin-bottom: 10px; }
+  .panel { border: 1.4px dashed #B4C2DC; border-radius: 10px; padding: 12px; background: #FBFCFE; position: relative; }
+  .cyl { border-radius: 50% / 14px; padding-top: 16px; padding-bottom: 12px; }
+  .node { display: inline-block; border: 1.4px solid var(--box-b); border-radius: 5px; padding: 3px 7px; background: #fff; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<!-- 1. BLOCKCHAIN STRUCTURE WITH MERKLE TREE =================================== -->
+<section id="d1" style="width:800px">
+  <div class="small" style="text-align:center; margin-bottom:10px">each block's <b>hash</b> is stored as the next block's <b>previous_hash</b> · hashes start with d = 2 zeros · values from a test run</div>
+  <style>
+    .hdr td { padding: 1.6px 7px; font-size: 11.3px; }
+    .hdr td.t { color: var(--blue); }
+    .mk { position: relative; z-index: 2; border: 1.5px solid var(--box-b); background: #fff; border-radius: 5px; padding: 3px 6px; font-family: "DejaVu Sans Mono", monospace; font-size: 11.3px; text-align: center; }
+    .mk.root { background: var(--ok); border-color: var(--ok-b); font-weight: bold; }
+    .rec { position: relative; z-index: 2; border: 1.5px solid var(--grey-b); background: var(--grey); border-radius: 5px; padding: 3px 4px; font-size: 11.5px; text-align: center; width: 128px; }
+  </style>
+  <div class="row" style="gap:40px; align-items:flex-start">
+    <div class="card" id="k4" style="width:220px">
+      <div class="hd">Block #4</div>
+      <table class="mono hdr">
+        <tr><td class="t">index</td><td>4</td></tr>
+        <tr><td class="t">timestamp</td><td>1793742695</td></tr>
+        <tr><td class="t">record_count</td><td>3</td></tr>
+        <tr><td class="t">previous_hash</td><td>004ea716…</td></tr>
+        <tr><td class="t">merkle_root</td><td>8874b6f8…</td></tr>
+        <tr><td class="t">sealed_by</td><td>POOL-M3</td></tr>
+        <tr><td class="t">token_reward</td><td>5</td></tr>
+        <tr><td class="t">transaction_id</td><td>34b1ad04…</td></tr>
+        <tr><td class="t">difficulty</td><td>2</td></tr>
+        <tr><td class="t">nonce</td><td style="font-size:9.6px">3298534883516</td></tr>
+        <tr><td class="t">hash</td><td><span class="zero">00</span>6d2dc7…</td></tr>
+      </table>
+    </div>
+    <div class="card" id="k5" style="width:220px; border-color:var(--blue)">
+      <div class="hd">Block #5</div>
+      <table class="mono hdr">
+        <tr><td class="t">index</td><td>5</td></tr>
+        <tr><td class="t">timestamp</td><td>1793742696</td></tr>
+        <tr><td class="t">record_count</td><td>4</td></tr>
+        <tr id="k5prev"><td class="t">previous_hash</td><td>006d2dc7…</td></tr>
+        <tr class="hl" id="k5mr"><td class="t">merkle_root</td><td>60d66b9e…</td></tr>
+        <tr><td class="t">sealed_by</td><td>SOLO-admin</td></tr>
+        <tr><td class="t">token_reward</td><td>5</td></tr>
+        <tr class="hl" id="k5tx"><td class="t">transaction_id</td><td>1a909ba7…</td></tr>
+        <tr><td class="t">difficulty</td><td>2</td></tr>
+        <tr><td class="t">nonce</td><td>760</td></tr>
+        <tr><td class="t">hash</td><td><span class="zero">00</span>9bd9f2…</td></tr>
+      </table>
+    </div>
+    <div class="card" id="k6" style="width:220px">
+      <div class="hd">Block #6</div>
+      <table class="mono hdr">
+        <tr><td class="t">index</td><td>6</td></tr>
+        <tr><td class="t">timestamp</td><td>1793742697</td></tr>
+        <tr><td class="t">record_count</td><td>1</td></tr>
+        <tr><td class="t">previous_hash</td><td>009bd9f2…</td></tr>
+        <tr><td class="t">merkle_root</td><td>a3ce5003…</td></tr>
+        <tr><td class="t">sealed_by</td><td>SOLO-admin</td></tr>
+        <tr><td class="t">token_reward</td><td>0</td></tr>
+        <tr><td class="t">transaction_id</td><td>0000…0000</td></tr>
+        <tr><td class="t">difficulty</td><td>2</td></tr>
+        <tr><td class="t">nonce</td><td>38</td></tr>
+        <tr><td class="t">hash</td><td><span class="zero">00</span>313661…</td></tr>
+      </table>
+    </div>
+  </div>
+  <div style="height:40px"></div>
+  <div class="row" style="gap:28px; align-items:flex-start; justify-content:flex-start; padding-left:8px">
+    <div class="panel" style="width:560px; padding:12px 6px">
+      <div class="row"><div class="mk root" id="mr">root 60d66b9e…</div></div>
+      <div style="height:28px"></div>
+      <div class="row" style="gap:150px"><div class="mk" id="m01">H(L0‖L1) 6c52c630…</div><div class="mk" id="m23">H(L2‖L3) 015264d1…</div></div>
+      <div style="height:28px"></div>
+      <div class="row" style="gap:10px"><div class="mk" id="l0">L0 36350226…</div><div class="mk" id="l1">L1 a2ea3112…</div><div class="mk" id="l2">L2 bf74bb18…</div><div class="mk" id="l3">L3 7a2dbff5…</div></div>
+      <div style="height:24px"></div>
+      <div class="row" style="gap:6px"><div class="rec" id="r0"><b>FINE_PAID</b><br>e8c1… ALU002</div><div class="rec" id="r1"><b>RETURNED</b><br>58c0… ALU003</div><div class="rec" id="r2"><b>BORROWED</b><br>a74c… ALU001</div><div class="rec" id="r3"><b>BORROWED</b><br>755c… ALU001</div></div>
+      <div class="title" style="margin:10px 0 2px">Merkle tree of block #5 (built from scratch)</div>
+      <div class="small" style="text-align:center; margin-top:2px">leaf = SHA-256(record payload | signature | review) &nbsp;·&nbsp; parent = SHA-256(0x01 ‖ left ‖ right)<br>an odd node is promoted unchanged &nbsp;·&nbsp; empty block: root = 64 zeros</div>
+    </div>
+    <div class="col" style="width:180px; gap:20px; margin-top:14px">
+      <div class="box new" id="rw"><b>Reward transaction</b><br><span class="small">derived from the block's RETURNED records:</span><br><span class="mono" style="font-size:11.5px">ALU003 5 − 1 fee</span></div>
+      <div class="small" style="text-align:left">hash = SHA-256(index | timestamp | record_count | previous_hash | merkle_root | sealed_by | token_reward | transaction_id | difficulty | nonce)</div>
+    </div>
+  </div>
+  <script type="application/json" class="arrows">[
+    ["k4", "k5", {"from": "r", "to": "l", "fromY": 0.95, "toY": 0.29}],
+    ["k5", "k6", {"from": "r", "to": "l", "fromY": 0.95, "toY": 0.29}],
+    ["mr", "k5", {"from": "t", "to": "b", "toX": 0.5, "label": "stored as merkle_root", "labelAt": 0.55}],
+    ["m01", "mr", {"from": "t", "to": "b"}], ["m23", "mr", {"from": "t", "to": "b"}],
+    ["l0", "m01", {"from": "t", "to": "b"}], ["l1", "m01", {"from": "t", "to": "b"}],
+    ["l2", "m23", {"from": "t", "to": "b"}], ["l3", "m23", {"from": "t", "to": "b"}],
+    ["r0", "l0", {"from": "t", "to": "b"}], ["r1", "l1", {"from": "t", "to": "b"}],
+    ["r2", "l2", {"from": "t", "to": "b"}], ["r3", "l3", {"from": "t", "to": "b"}],
+    ["rw", "k5", {"from": "t", "to": "b", "toX": 0.93, "label": "SHA-256 → transaction_id", "labelAt": 0.3}]
+  ]</script>
+</section>
+
+<!-- 2. PENDING POOL FLOW ======================================================== -->
+<section id="d2">
+  <div class="row" style="justify-content:flex-start; gap:110px">
+    <div class="col" style="width:440px; gap:24px">
+      <div class="box" id="p1"><b>Lending command</b> borrow, return, reserve, renew, mark_lost,<br>token transfer, settle_fine &nbsp;—&nbsp; or the automatic <b>overdue scan</b></div>
+      <div class="box" id="p2"><b>Input checks</b>: ID format, book / copy / member registered,<br>dates well-formed and not in the past, amounts &gt; 0</div>
+      <div class="box" id="p3"><b>Rule checks on the projected state</b><br>(confirmed chain + every request already in the pool):<br>copy state machine, queue, renewals, balance / UTXO inputs</div>
+      <div class="box" id="p4"><b>nonce</b> = signer's next nonce (confirmed + pending)<br><b>request_id</b> = first 12 hex of SHA-256(fields + 16 random bytes)</div>
+      <div class="box" id="p5"><b>ECDSA P-256 signature</b> with the member's key (vault)<br>or the librarian's key, then verified with the registered public key</div>
+      <div class="box" id="p6"><b>Fraud heuristics</b> (see the fraud pipeline)</div>
+    </div>
+    <div class="col" style="width:170px; gap:24px; padding-top:118px">
+      <div class="box err" id="e1" style="padding:18px 8px"><b>ERROR</b><br>nothing is stored</div>
+      <div style="height:100px"></div>
+    </div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-start; gap:30px; padding-left:20px">
+    <div class="box ok" id="q1" style="width:190px"><b>PENDING</b><br>minable</div>
+    <div class="box err" id="q2" style="width:190px"><b>SUSPICIOUS</b><br>withheld from mining</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-start; gap:30px; padding-left:20px">
+    <div class="box pend cyl" id="q3" style="width:410px"><b>PENDING POOL</b> &nbsp;<span class="mono">pending.dat</span><br><span class="small">request_id · book_id · copy_id · member_id · action · priority · status</span></div>
+    <div class="box" id="q4" style="width:250px"><b>fraud_review</b><br>approve_suspicious / reject_suspicious</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-start; padding-left:20px">
+    <div class="box" id="q5" style="width:410px"><b>pool_sort</b> (qsort, total order)<br>1. overdue-related: OVERDUE flags, late returns, fines<br>2. reservation date ascending (who waited longest)<br>3. arrival order</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-start; padding-left:20px">
+    <div class="box" id="q6" style="width:410px"><b>Miner takes the top N = 4 PENDING requests</b><br>nonce order per signer · signature re-verified ·<br>rules re-applied to a trial state · the rest wait</div>
+  </div>
+  <script type="application/json" class="arrows">[
+    ["p1", "p2", {}], ["p2", "p3", {}], ["p3", "p4", {}], ["p4", "p5", {}], ["p5", "p6", {}],
+    ["p2", "e1", {"from": "r", "to": "l", "label": "invalid", "toY": 0.25, "labelAt": 0.2, "labelDy": -10}],
+    ["p3", "e1", {"from": "r", "to": "l", "label": "rule broken", "toY": 0.75, "labelAt": 0.2, "labelDy": 10}],
+    ["p6", "q1", {"fromX": 0.27, "label": "no flag", "labelAt": 0.4}],
+    ["p6", "q2", {"fromX": 0.74, "label": "flagged", "labelAt": 0.4}],
+    ["q1", "q3", {"toX": 0.25}], ["q2", "q3", {"toX": 0.75}],
+    ["q2", "q4", {"from": "r", "to": "t"}],
+    ["q4", "q3", {"from": "l", "to": "r", "label": "approved → PENDING", "level": true, "labelDy": -10}],
+    ["q3", "q5", {}], ["q5", "q6", {}]
+  ]</script>
+</section>
+
+<!-- 3. COPY STATE MACHINE AND RESERVATION QUEUE =================================== -->
+<section id="d3">
+  <div class="row" style="gap:120px; padding-top:20px">
+    <div class="box ok" id="s_av" style="width:150px; padding:16px 6px"><b>AVAILABLE</b><br><span class="small">on the shelf</span></div>
+    <div class="box" id="s_bo" style="width:170px; padding:12px 6px; background:#E8F0FC"><b>BORROWED</b><br><span class="small">holder, due_date</span></div>
+    <div class="box pend" id="s_re" style="width:150px; padding:16px 6px"><b>RESERVED</b><br><span class="small">held for the queue head</span></div>
+  </div>
+  <div style="height:76px"></div>
+  <div class="row"><div class="box err" id="s_lo" style="width:170px; padding:14px 6px"><b>LOST</b><br><span class="small">final state</span></div></div>
+  <div class="row" style="gap:16px; margin-top:20px; align-items:stretch">
+    <div class="box grey" style="width:330px; text-align:left; font-size:13px"><b>While BORROWED</b> (the state does not change)<br>
+      • <b>renew_book</b>: due_date + 7 days, at most 2 times;<br>refused if another member is waiting or the copy is overdue<br>
+      • <b>overdue scan</b> (every command): past due_date → librarian-signed OVERDUE record; the fine grows 1 coin per day</div>
+    <div class="panel" style="width:380px">
+      <div class="title" style="margin-bottom:6px">Reservation queue for BK001 (FIFO)</div>
+      <div class="row" style="gap:6px; align-items:center">
+        <span class="small">head →</span>
+        <span class="node"><b>ALU003</b> 10-14</span><span class="node">ALU004 10-15</span><span class="node">ALU005 10-16</span><span class="small">← tail</span>
+      </div>
+      <div class="small" style="margin-top:8px">• reserve_book only when no copy of the title is AVAILABLE<br>
+        • on return, the copy becomes RESERVED for the head and the entry is removed<br>
+        • only that member can borrow the held copy; a borrow also removes them from the queue</div>
+    </div>
+  </div>
+  <script type="application/json" class="arrows">[
+    ["s_av", "s_bo", {"from": "r", "to": "l", "fromY": 0.3, "level": true, "label": "borrow_book", "labelDy": -11}],
+    ["s_bo", "s_av", {"from": "l", "to": "r", "fromY": 0.75, "level": true, "label": "return, queue empty", "labelDy": 11}],
+    ["s_bo", "s_re", {"from": "r", "to": "l", "fromY": 0.3, "level": true, "label": "return, queue waiting", "labelDy": -11}],
+    ["s_re", "s_bo", {"from": "l", "to": "r", "fromY": 0.75, "level": true, "label": "borrow by queue head", "labelDy": 11}],
+    ["s_av", "s_lo", {"from": "b", "to": "l", "label": "mark_lost + reason", "labelAt": 0.75, "labelDy": -10}],
+    ["s_bo", "s_lo", {"from": "b", "to": "t", "label": "mark_lost + reason"}]
+  ]</script>
+</section>
+
+<!-- 4. TOKEN REWARD FLOW ============================================================ -->
+<section id="d4">
+  <div class="row"><div class="box" id="t1" style="width:420px"><b>return_book BK001-C1</b><br>finds the copy's most recent BORROWED record on the chain</div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:30px">
+    <div class="box new" id="t2a" style="width:250px"><b>On time</b> (now ≤ due_date)<br>token_reward = 10, fine_amount = 0</div>
+    <div class="box new" id="t2b" style="width:250px"><b>Late</b><br>token_reward = 5<br>fine_amount = days late × 1 coin</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row"><div class="box pend cyl" id="t3" style="width:420px"><b>RETURNED request</b> signed by the member → <b>PENDING POOL</b><br><span class="small">no coins move yet</span></div></div>
+  <div class="gap-s"></div>
+  <div class="row"><div class="box" id="t4" style="width:520px"><b>Block assembly</b>: one reward output per RETURNED record in the block<br><span class="mono">REWARD: LIBRARY → member 10 or 5 (ref record_id), fee 1 each</span><br>transaction_id = SHA-256(reward tx) · token_reward = sum of the block's rewards</div></div>
+  <div class="gap-s"></div>
+  <div class="row"><div class="box" id="t5" style="width:520px"><b>Proof-of-work and confirmation</b>: the miner earns block reward + fees</div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:24px; align-items:stretch">
+    <div class="box ok" id="t6" style="width:240px"><b>UTXO model</b><br>new unspent output<br><span class="mono">txid:i → member 9 / 4</span><br><span class="small">UTXO set printed after the block</span></div>
+    <div class="box ok" id="t7" style="width:240px"><b>Account model</b><br>balance += 9 / 4<br><span class="small">REWARD node appended to the member's history list</span></div>
+    <div class="box grey" id="t8" style="width:210px"><b>Late: fine assessed</b><br>settle_fine:<br>tokens → FINE tx to LIBRARY (+1 fee)<br>cash → librarian-signed, no coins</div>
+  </div>
+  <script type="application/json" class="arrows">[
+    ["t1", "t2a", {}], ["t1", "t2b", {}], ["t2a", "t3", {}], ["t2b", "t3", {}],
+    ["t3", "t4", {}], ["t4", "t5", {}], ["t5", "t6", {}], ["t5", "t7", {}], ["t5", "t8", {}]
+  ]</script>
+</section>
+
+<!-- 5. MINING WORKFLOW =================================================================== -->
+<section id="d5">
+  <div class="row"><div class="box grey" id="w0" style="width:650px"><b>Difficulty d = 1–4</b> (option -D or set_difficulty) · target: hash starts with d zeros<br><span class="small">expected work ≈ 16<sup>d</sup> attempts: 16, 256, 4 096, 65 536</span></div></div>
+  <div class="gap-s"></div>
+  <div class="row"><div class="box" id="w1" style="width:650px"><b>library_assemble_block</b>: discard requests that became invalid, sort the pool,<br>take the top N, re-verify every ECDSA signature, re-apply every rule to a trial state</div></div>
+  <div class="gap-s"></div>
+  <div class="row"><div class="box" id="w2" style="width:650px"><b>block_finalise_body</b>: Merkle root, reward transaction, transaction_id; timestamp &gt; previous block</div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:16px; align-items:stretch">
+    <div class="box" id="m1" style="width:230px"><b>mine_solo</b><br>one miner tries nonce 0, 1, 2 …</div>
+    <div class="box" id="m2" style="width:230px"><b>mine_pool</b><br>2–8 miners, random 100–600 attempts per round, own nonce range and sealed_by</div>
+    <div class="box" id="m3" style="width:230px"><b>mine_cloud &lt;rounds&gt;</b><br>600 rented attempts per round for 1–5 rounds; a block may span rounds</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row"><div class="box new" id="w3" style="width:650px"><b>Proof-of-work loop</b>: SHA-256(header prefix + nonce)<br>starts with d zeros? &nbsp;no → nonce + 1 &nbsp;·&nbsp; yes → attempts reported</div></div>
+  <div class="gap-s"></div>
+  <div class="row"><div class="box" id="w4" style="width:650px"><b>library_commit_block</b>: verify link, timestamp, hash, PoW, Merkle root, signatures, rules<br>→ append · update state · remove confirmed requests · save chain.dat, pending.dat, state.dat</div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:16px; align-items:stretch">
+    <div class="box ok" id="x1" style="width:230px"><b>Solo reward</b><br>block reward 20 + fees, all to the miner</div>
+    <div class="box ok" id="x2" style="width:230px"><b>Pool reward</b><br>2% pool fee, then share = attempts / total attempts</div>
+    <div class="box ok" id="x3" style="width:230px"><b>Cloud earnings</b><br>per round: reward − 10% − 15 rental; gross, fees, net; warning when fees &gt; rewards</div>
+  </div>
+  <script type="application/json" class="arrows">[
+    ["w0", "w1", {}], ["w1", "w2", {}], ["w2", "m1", {}], ["w2", "m2", {}], ["w2", "m3", {}],
+    ["m1", "w3", {}], ["m2", "w3", {}], ["m3", "w3", {}], ["w3", "w4", {}],
+    ["w4", "x1", {}], ["w4", "x2", {}], ["w4", "x3", {}]
+  ]</script>
+</section>
+
+<!-- 6. FRAUD DETECTION PIPELINE ============================================================ -->
+<section id="d6">
+  <div class="row"><div class="box" id="f0" style="width:420px"><b>Signed request</b> (nonce assigned, ECDSA signature verified)</div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:10px; align-items:stretch">
+    <div class="box pend" id="h1" style="width:178px"><b>EXCESSIVE_BORROWS</b><br>member would hold more than 3 copies</div>
+    <div class="box pend" id="h2" style="width:178px"><b>RAPID_REBORROW</b><br>same title within 24 h of returning it</div>
+    <div class="box pend" id="h3" style="width:178px"><b>DUPLICATE_REQUEST</b><br>request_id already on the chain or in the pool</div>
+    <div class="box pend" id="h4" style="width:178px"><b>CONDITION_DOWNGRADE</b><br>condition drops &gt; 1 level with no reason code</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row"><div class="box grey" id="gd" style="width:260px"><b>Any heuristic triggered?</b></div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:40px">
+    <div class="box ok" id="g1" style="width:220px"><b>No → PENDING</b><br>minable</div>
+    <div class="box err" id="g2" style="width:300px"><b>Yes → SUSPICIOUS</b><br>stays in the pool (pending.dat) and is<br>never selected by any miner</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-end; padding-right:60px"><div class="box" id="g3" style="width:320px"><b>fraud_review</b><br>each flag explained with evidence<br><span class="small">librarians: ACCESS DENIED for approve / reject</span></div></div>
+  <div class="gap"></div>
+  <div class="row" style="gap:24px; align-items:stretch">
+    <div class="box ok" id="g4" style="width:330px"><b>approve_suspicious &lt;id&gt;</b> (admin)<br>note "approved by admin (FLAGS)" stored with the record (inside the Merkle leaf) · request re-validated: a replayed request still fails the nonce / request_id check and is discarded</div>
+    <div class="box err" id="g5" style="width:330px"><b>reject_suspicious &lt;id&gt;</b> (admin)<br>removed from the pool · the signer's later requests are renumbered and re-signed · requests that depended on it are discarded</div>
+  </div>
+  <div class="gap"></div>
+  <div class="row" style="justify-content:flex-start; padding-left:40px"><div class="box ok cyl" id="g6" style="width:250px"><b>Mined into a block</b></div></div>
+  <script type="application/json" class="arrows">[
+    ["f0", "h1", {}], ["f0", "h2", {}], ["f0", "h3", {}], ["f0", "h4", {}],
+    ["h1", "gd", {"toX": 0.2}], ["h2", "gd", {"toX": 0.4}], ["h3", "gd", {"toX": 0.6}], ["h4", "gd", {"toX": 0.8}],
+    ["gd", "g1", {"fromX": 0.3, "label": "no"}], ["gd", "g2", {"fromX": 0.7, "label": "yes"}],
+    ["g2", "g3", {}],
+    ["g3", "g4", {}], ["g3", "g5", {}],
+    ["g4", "g6", {"toX": 0.7}],
+    ["g1", "g6", {"from": "l", "to": "l", "side": 24}]
+  ]</script>
+</section>
+<script>
+// Draw elbow arrows between elements listed in each section's JSON block.
+function anchor(el, side, sec, fx, fy) {
+  const r = el.getBoundingClientRect(), s = sec.getBoundingClientRect();
+  const x = r.left - s.left, y = r.top - s.top;
+  fx = fx ?? 0.5; fy = fy ?? 0.5;
+  if (side === "t") return [x + r.width * fx, y];
+  if (side === "b") return [x + r.width * fx, y + r.height];
+  if (side === "l") return [x, y + r.height * fy];
+  return [x + r.width, y + r.height * fy];
+}
+for (const sec of document.querySelectorAll("section")) {
+  const spec = sec.querySelector("script.arrows");
+  if (!spec) continue;
+  const list = JSON.parse(spec.textContent);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "arrows");
+  svg.setAttribute("width", sec.offsetWidth); svg.setAttribute("height", sec.offsetHeight);
+  svg.innerHTML = '<defs><marker id="ah-' + sec.id + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>';
+  sec.appendChild(svg);
+  for (const [a, b, o] of list) {
+    const ea = document.getElementById(a), eb = document.getElementById(b);
+    const fs = o.from || "b", ts = o.to || "t";
+    const [x1, y1] = anchor(ea, fs, sec, o.fromX, o.fromY);
+    let [x2, y2] = anchor(eb, ts, sec, o.toX, o.toY);
+    if (o.level) y2 = y1;
+    let d;
+    if (o.straight) d = `M${x1},${y1} L${x1},${y2}`;
+    else if (fs === "b" && ts === "t") { const ym = (y1 + y2) / 2; d = `M${x1},${y1} V${ym} H${x2} V${y2}`; }
+    else if (fs === "r" && ts === "l" || fs === "l" && ts === "r") { const xm = (x1 + x2) / 2; d = `M${x1},${y1} H${xm} V${y2} H${x2}`; }
+    else if (fs === "r" && ts === "r") { const xs = Math.max(x1, x2) + (o.side || 30); d = `M${x1},${y1} H${xs} V${y2} H${x2}`; }
+    else if (fs === "t" && ts === "b") { const ym = (y1 + y2) / 2; d = `M${x1},${y1} V${ym} H${x2} V${y2}`; }
+    else if (fs === "l" && ts === "l") { const xs = Math.min(x1, x2) - (o.side || 30); d = `M${x1},${y1} H${xs} V${y2} H${x2}`; }
+    else if ((fs === "r" || fs === "l") && ts === "t") d = `M${x1},${y1} H${x2} V${y2}`;
+    else if (fs === "b" && (ts === "r" || ts === "l")) d = `M${x1},${y1} V${y2} H${x2}`;
+    else d = `M${x1},${y1} L${x2},${y2}`;
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", d); p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "#4a5568"); p.setAttribute("stroke-width", "1.5");
+    p.setAttribute("marker-end", `url(#ah-${sec.id})`);
+    svg.appendChild(p);
+    if (o.label) {
+      const len = p.getTotalLength(), pt = p.getPointAtLength(len * (o.labelAt ?? 0.5));
+      const l = document.createElement("div");
+      l.className = "lbl"; l.textContent = o.label;
+      l.style.left = pt.x + "px"; l.style.top = (pt.y + (o.labelDy || 0)) + "px";
+      sec.appendChild(l);
+    }
+  }
+}
+</script>
+</body>
+</html>

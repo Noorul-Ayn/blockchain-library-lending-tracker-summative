@@ -164,7 +164,17 @@ mine_cloud 3                    # rent 600 attempts/round for 3 rounds: gross, f
   - a condition downgrade of more than one level without a reason code.
 - **Validation.** `validate_chain` checks, for every block: links, recomputed block hashes, proof-of-work, Merkle roots, reward transactions, strictly increasing timestamps and every ECDSA signature. It then replays every record through the lending rules, compares `state.dat` with the state rebuilt from the chain, and checks the recorded chain length and tip hash. Deleted or rewritten newest blocks are reported.
 
-Details, diagrams and test results are in the technical report.
+### System design diagrams (`docs/diagrams/`)
+
+1. `1-blockchain-merkle-structure.png`: block header fields, hash links and the Merkle tree of a block
+2. `2-pending-pool-flow.png`: request validation, signing, prioritisation and fraud flagging
+3. `3-copy-state-machine-and-queue.png`: copy states and the FIFO reservation queue
+4. `4-token-reward-flow.png`: from a return to the reward transaction and the balance update
+5. `5-mining-workflow.png`: difficulty, block assembly and the solo / pool / cloud paths
+6. `6-fraud-detection-pipeline.png`: heuristics, SUSPICIOUS status and the admin review
+
+The diagram sources are in `docs/diagrams_src/` (HTML, rendered with a headless browser).
+Details and test results are in the technical report.
 
 ## 8. Files
 

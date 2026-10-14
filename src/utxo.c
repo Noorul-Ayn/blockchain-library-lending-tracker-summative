@@ -20,15 +20,23 @@ void utxo_init(UtxoSet *set)
     set->capacity = 0;
 }
 
-void utxo_reset(UtxoSet *set)
-{
-    set->count = 0;
-}
-
 void utxo_free(UtxoSet *set)
 {
     free(set->items);
     utxo_init(set);
+}
+
+Status utxo_copy(UtxoSet *dst, const UtxoSet *src)
+{
+    utxo_init(dst);
+    if (src->count == 0)
+        return LT_OK;
+    dst->items = malloc(src->count * sizeof *dst->items);
+    if (dst->items == NULL)
+        return LT_ERR_MEMORY;
+    memcpy(dst->items, src->items, src->count * sizeof *dst->items);
+    dst->count = dst->capacity = src->count;
+    return LT_OK;
 }
 
 static Status utxo_add(UtxoSet *set, const char *txid, int vout, const char *owner,
@@ -55,7 +63,7 @@ static Status utxo_add(UtxoSet *set, const char *txid, int vout, const char *own
     (void)str_copy(u->owner, sizeof u->owner, owner);
     u->amount = amount;
     u->created_in = block_index;
-    u->spent_in = -1;
+    u->spent_in = UTXO_PENDING;
     return LT_OK;
 }
 
@@ -98,11 +106,10 @@ size_t utxo_unspent_count(const UtxoSet *set, const char *owner)
     return n;
 }
 
-Status utxo_check_inputs(const UtxoSet *set, const Transaction *tx,
-                         UtxoReservedFn reserved, const void *ctx,
-                         long *input_total, char *err, size_t err_cap)
+Status utxo_check_inputs(const UtxoSet *set, const Transaction *tx, long *input_total,
+                         char *err, size_t err_cap)
 {
-    long total = 0, needed = tx->amount + tx->fee;
+    long total = 0, needed = tx_sender_debit(tx);
     size_t i, j;
 
     *input_total = 0;
@@ -125,20 +132,24 @@ Status utxo_check_inputs(const UtxoSet *set, const Transaction *tx,
             snprintf(err, err_cap, "output %.10s:%d does not exist", in->txid, in->vout);
             return LT_ERR_NOT_FOUND;
         }
+        if (u->spent && u->spent_in == UTXO_PENDING) {
+            snprintf(err, err_cap, "output %.10s:%d is already being spent by a pending "
+                                   "transaction", in->txid, in->vout);
+            return LT_ERR_DOUBLE_SPEND;
+        }
         if (u->spent) {
             snprintf(err, err_cap, "output %.10s:%d was already spent in block #%d",
                      in->txid, in->vout, u->spent_in);
             return LT_ERR_DOUBLE_SPEND;
         }
+        if (u->created_in == UTXO_PENDING) {
+            snprintf(err, err_cap, "output %.10s:%d is not confirmed yet", in->txid, in->vout);
+            return LT_ERR_STATE;
+        }
         if (strcmp(u->owner, tx->from) != 0) {
             snprintf(err, err_cap, "output %.10s:%d belongs to %s, not %s",
                      in->txid, in->vout, u->owner, tx->from);
             return LT_ERR_DENIED;
-        }
-        if (reserved != NULL && reserved(ctx, in->txid, in->vout)) {
-            snprintf(err, err_cap, "output %.10s:%d is already being spent by a pending "
-                                   "transaction", in->txid, in->vout);
-            return LT_ERR_DOUBLE_SPEND;
         }
         total += u->amount;
     }
@@ -151,23 +162,20 @@ Status utxo_check_inputs(const UtxoSet *set, const Transaction *tx,
     return LT_OK;
 }
 
-Status utxo_select_inputs(const UtxoSet *set, Transaction *tx,
-                          UtxoReservedFn reserved, const void *ctx,
-                          char *err, size_t err_cap)
+Status utxo_select_inputs(const UtxoSet *set, Transaction *tx, char *err, size_t err_cap)
 {
-    long total = 0, needed = tx->amount + tx->fee, available = 0;
+    long total = 0, needed = tx_sender_debit(tx), owned = 0;
     size_t i;
 
     tx->input_count = 0;
     for (i = 0; i < set->count && total < needed; i++) {   /* oldest first */
         const Utxo *u = &set->items[i];
 
-        if (u->spent || strcmp(u->owner, tx->from) != 0)
-            continue;
-        if (reserved != NULL && reserved(ctx, u->txid, u->vout))
+        if (u->spent || u->created_in == UTXO_PENDING || strcmp(u->owner, tx->from) != 0)
             continue;
         if (tx->input_count == TX_MAX_INPUTS) {
             snprintf(err, err_cap, "more than %d inputs would be needed", TX_MAX_INPUTS);
+            tx->input_count = 0;
             return LT_ERR_INSUFFICIENT;
         }
         (void)str_copy(tx->inputs[tx->input_count].txid, HASH_HEX_LEN, u->txid);
@@ -177,12 +185,14 @@ Status utxo_select_inputs(const UtxoSet *set, Transaction *tx,
     }
     if (total < needed) {
         for (i = 0; i < set->count; i++) {
-            if (!set->items[i].spent && strcmp(set->items[i].owner, tx->from) == 0)
-                available += set->items[i].amount;
+            const Utxo *u = &set->items[i];
+            if (strcmp(u->owner, tx->from) == 0 && (!u->spent || u->spent_in == UTXO_PENDING) &&
+                u->created_in != UTXO_PENDING)
+                owned += u->amount;
         }
         snprintf(err, err_cap, "%s has %ld coin(s) in unspent outputs (%ld spendable now) "
                                "but needs %ld (amount %ld + fee %ld)",
-                 tx->from, available, total, needed, tx->amount, tx->fee);
+                 tx->from, owned, total, needed, tx->amount, tx->fee);
         tx->input_count = 0;
         return LT_ERR_INSUFFICIENT;
     }
@@ -195,23 +205,28 @@ Status utxo_apply(UtxoSet *set, const Transaction *tx, const char *txid,
     Transaction resolved;
     long input_total = 0, change;
     size_t i;
-    Status st;
+    Status st = LT_OK;
 
-    if (tx->type == TX_NONE)
-        return LT_OK;
+    if (!tx_moves_tokens(tx))
+        return LT_OK;                     /* NONE, or a fine paid in cash */
     if (tx->type == TX_REWARD) {
-        long credit = tx_recipient_credit(tx);
-        return credit > 0 ? utxo_add(set, txid, 0, tx->to, credit, block_index) : LT_OK;
+        for (i = 0; i < tx->output_count && st == LT_OK; i++) {
+            long credit = tx->outputs[i].amount - tx->fee;
+            if (credit > 0)
+                st = utxo_add(set, txid, (int)i, tx->outputs[i].to, credit, block_index);
+        }
+        return st;
     }
 
-    /* TRANSFER: inputs chosen under the account model are selected now. */
+    /* TRANSFER or token FINE. Inputs chosen under the account model are
+     * selected here, at confirmation time (oldest outputs first). */
     resolved = *tx;
     if (resolved.input_count == 0) {
-        st = utxo_select_inputs(set, &resolved, NULL, NULL, err, err_cap);
+        st = utxo_select_inputs(set, &resolved, err, err_cap);
         if (st != LT_OK)
             return st;
     }
-    st = utxo_check_inputs(set, &resolved, NULL, NULL, &input_total, err, err_cap);
+    st = utxo_check_inputs(set, &resolved, &input_total, err, err_cap);
     if (st != LT_OK)
         return st;
 

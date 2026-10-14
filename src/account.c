@@ -33,20 +33,33 @@ static void free_history(Account *account)
     account->history_len = 0;
 }
 
-void accounts_reset(AccountTable *table)
+void accounts_free(AccountTable *table)
 {
     size_t i;
 
     for (i = 0; i < table->count; i++)
         free_history(&table->items[i]);
-    table->count = 0;
-}
-
-void accounts_free(AccountTable *table)
-{
-    accounts_reset(table);
     free(table->items);
     accounts_init(table);
+}
+
+Status accounts_copy(AccountTable *dst, const AccountTable *src)
+{
+    size_t i;
+
+    accounts_init(dst);
+    if (src->count == 0)
+        return LT_OK;
+    dst->items = malloc(src->count * sizeof *dst->items);
+    if (dst->items == NULL)
+        return LT_ERR_MEMORY;
+    for (i = 0; i < src->count; i++) {
+        dst->items[i] = src->items[i];
+        dst->items[i].history_head = dst->items[i].history_tail = NULL;
+        dst->items[i].history_len = 0;
+    }
+    dst->count = dst->capacity = src->count;
+    return LT_OK;
 }
 
 static Account *find_mut(AccountTable *table, const char *id)
@@ -65,50 +78,63 @@ const Account *accounts_find(const AccountTable *table, const char *id)
     return find_mut((AccountTable *)table, id);
 }
 
-Status accounts_ensure(AccountTable *table, const char *id)
+long accounts_balance(const AccountTable *table, const char *id)
 {
-    Account *a;
+    const Account *a = accounts_find(table, id);
+    return a != NULL ? a->balance : 0;
+}
 
-    if (find_mut(table, id) != NULL)
-        return LT_OK;
+long accounts_nonce(const AccountTable *table, const char *id)
+{
+    const Account *a = accounts_find(table, id);
+    return a != NULL ? a->nonce : 0;
+}
+
+/** Returns the account, creating it with balance 0 and nonce 0 if needed. */
+static Account *ensure(AccountTable *table, const char *id)
+{
+    Account *a = find_mut(table, id);
+
+    if (a != NULL)
+        return a;
     if (table->count == table->capacity) {
         size_t new_cap = table->capacity ? table->capacity * 2 : ACCOUNTS_INITIAL_CAPACITY;
         Account *grown;
 
         if (new_cap > SIZE_MAX / sizeof *grown)
-            return LT_ERR_MEMORY;
+            return NULL;
         grown = realloc(table->items, new_cap * sizeof *grown);
         if (grown == NULL)
-            return LT_ERR_MEMORY;
+            return NULL;
         table->items = grown;
         table->capacity = new_cap;
     }
-    a = &table->items[table->count++];
+    a = &table->items[table->count];
     memset(a, 0, sizeof *a);
-    if (str_copy(a->id, sizeof a->id, id) != 0) {
-        table->count--;
-        return LT_ERR_INPUT;
-    }
-    return LT_OK;
+    if (str_copy(a->id, sizeof a->id, id) != 0)
+        return NULL;
+    table->count++;
+    return a;
 }
 
 /** Appends one history node at the tail of the account's linked list. */
-static Status record_history(Account *account, const Transaction *tx, const char *txid,
-                             int block_index)
+static Status record_history(Account *account, TxType type, const char *sender,
+                             const char *recipient, long amount, long fee, long nonce,
+                             const char *txid, int block_index, time_t timestamp)
 {
     TxRecord *node = calloc(1, sizeof *node);
 
     if (node == NULL)
         return LT_ERR_MEMORY;
     (void)str_copy(node->txid, sizeof node->txid, txid);
-    node->type = tx->type;
-    (void)str_copy(node->sender, sizeof node->sender, tx->from);
-    (void)str_copy(node->recipient, sizeof node->recipient, tx->to);
-    node->amount = tx->amount;
-    node->fee = tx->fee;
-    node->nonce = tx->nonce;
+    node->type = type;
+    (void)str_copy(node->sender, sizeof node->sender, sender);
+    (void)str_copy(node->recipient, sizeof node->recipient, recipient);
+    node->amount = amount;
+    node->fee = fee;
+    node->nonce = nonce;
     node->block_index = block_index;
-    node->timestamp = tx->timestamp;
+    node->timestamp = timestamp;
     node->next = NULL;
 
     if (account->history_tail == NULL)
@@ -120,66 +146,94 @@ static Status record_history(Account *account, const Transaction *tx, const char
     return LT_OK;
 }
 
-Status accounts_check_transfer(const AccountTable *table, const Transaction *tx,
-                               long pending_debit, long pending_count,
-                               char *err, size_t err_cap)
+Status accounts_check(const AccountTable *table, const Transaction *tx,
+                      char *err, size_t err_cap)
 {
-    const Account *sender = accounts_find(table, tx->from);
-    long balance = sender ? sender->balance : 0;
-    long nonce = sender ? sender->nonce : 0;
-    long available = balance - pending_debit;
-    long expected_nonce = nonce + pending_count;
+    long balance = accounts_balance(table, tx->from);
+    long expected = accounts_nonce(table, tx->from);
     long needed = tx_sender_debit(tx);
 
-    if (tx->nonce != expected_nonce) {
-        if (tx->nonce < expected_nonce)
-            snprintf(err, err_cap, "nonce %ld was already used by %s (expected %ld)",
-                     tx->nonce, tx->from, expected_nonce);
+    if (tx->nonce != expected) {
+        if (tx->nonce < expected)
+            snprintf(err, err_cap, "account nonce %ld was already used by %s (expected %ld)",
+                     tx->nonce, tx->from, expected);
         else
-            snprintf(err, err_cap, "nonce %ld is out of order for %s (expected %ld)",
-                     tx->nonce, tx->from, expected_nonce);
+            snprintf(err, err_cap, "account nonce %ld is out of order for %s (expected %ld)",
+                     tx->nonce, tx->from, expected);
         return LT_ERR_NONCE;
     }
-    if (available < needed) {
-        snprintf(err, err_cap, "%s has %ld coin(s) available (%ld balance - %ld pending) but "
-                               "needs %ld (amount %ld + fee %ld)",
-                 tx->from, available, balance, pending_debit, needed, tx->amount, tx->fee);
+    if (balance < needed) {
+        snprintf(err, err_cap, "%s has %ld coin(s) available but needs %ld "
+                               "(amount %ld + fee %ld)",
+                 tx->from, balance, needed, tx->amount, tx->fee);
         return LT_ERR_INSUFFICIENT;
     }
     return LT_OK;
 }
 
 Status accounts_apply(AccountTable *table, const Transaction *tx, const char *txid,
-                      int block_index, char *err, size_t err_cap)
+                      int block_index, int keep_history, char *err, size_t err_cap)
 {
     Account *sender, *recipient;
+    size_t i;
     Status st;
 
-    if (tx->type == TX_NONE)
+    if (!tx_moves_tokens(tx))
         return LT_OK;
 
-    /* Create both accounts first: creating one may move the array. */
-    st = accounts_ensure(table, tx->to);
-    if (st == LT_OK && tx->type == TX_TRANSFER)
-        st = accounts_ensure(table, tx->from);
-    if (st != LT_OK)
-        return st;
-    recipient = find_mut(table, tx->to);
-
     if (tx->type == TX_REWARD) {
-        recipient->balance += tx_recipient_credit(tx);
-        return record_history(recipient, tx, txid, block_index);
+        for (i = 0; i < tx->output_count; i++) {
+            const TxOutput *out = &tx->outputs[i];
+            recipient = ensure(table, out->to);
+            if (recipient == NULL)
+                return LT_ERR_MEMORY;
+            recipient->balance += out->amount - tx->fee;
+            if (keep_history) {
+                st = record_history(recipient, TX_REWARD, LIBRARY_ACCOUNT, out->to,
+                                    out->amount, tx->fee, -1, txid, block_index,
+                                    tx->timestamp);
+                if (st != LT_OK)
+                    return st;
+            }
+        }
+        return LT_OK;
     }
 
-    sender = find_mut(table, tx->from);
-    st = accounts_check_transfer(table, tx, 0, 0, err, err_cap);
+    st = accounts_check(table, tx, err, err_cap);
     if (st != LT_OK)
         return st;
+    /* Create both accounts first: creating one may move the array. */
+    if (ensure(table, tx->to) == NULL || ensure(table, tx->from) == NULL)
+        return LT_ERR_MEMORY;
+    sender = find_mut(table, tx->from);
+    recipient = find_mut(table, tx->to);
     sender->balance -= tx_sender_debit(tx);
     sender->nonce++;
-    recipient->balance += tx_recipient_credit(tx);
-    st = record_history(sender, tx, txid, block_index);
+    recipient->balance += tx->amount;
+    if (!keep_history)
+        return LT_OK;
+    st = record_history(sender, tx->type, tx->from, tx->to, tx->amount, tx->fee, tx->nonce,
+                        txid, block_index, tx->timestamp);
     if (st == LT_OK)
-        st = record_history(recipient, tx, txid, block_index);
+        st = record_history(recipient, tx->type, tx->from, tx->to, tx->amount, tx->fee,
+                            tx->nonce, txid, block_index, tx->timestamp);
     return st;
+}
+
+Status accounts_use_nonce(AccountTable *table, const Transaction *tx, char *err, size_t err_cap)
+{
+    long expected = accounts_nonce(table, tx->from);
+    Account *a;
+
+    if (tx->nonce != expected) {
+        snprintf(err, err_cap, "account nonce %ld %s for %s (expected %ld)", tx->nonce,
+                 tx->nonce < expected ? "was already used" : "is out of order", tx->from,
+                 expected);
+        return LT_ERR_NONCE;
+    }
+    a = ensure(table, tx->from);
+    if (a == NULL)
+        return LT_ERR_MEMORY;
+    a->nonce++;
+    return LT_OK;
 }

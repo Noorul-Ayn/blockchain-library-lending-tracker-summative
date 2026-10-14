@@ -1,12 +1,11 @@
 /**
  * @file ledger.h
- * @brief Selects and drives one of the two token ledger models.
+ * @brief Selects the UTXO or account model for a session.
  *
- * The model is chosen once per session (menu at start-up or --model) and
- * applies to every token transaction in that session. Balances are never
- * stored separately: at start-up the ledger is rebuilt by replaying every
- * transaction on the confirmed chain, so the chain is the single source of
- * truth and the same chain can be viewed under either model.
+ * Both models read the same chain: transactions are stored in a model-neutral
+ * form, and balances are rebuilt by replaying every confirmed transaction
+ * into the model chosen at start-up. The chosen model then validates every
+ * new token transaction in that session.
  */
 #ifndef LT_LEDGER_H
 #define LT_LEDGER_H
@@ -23,24 +22,30 @@ typedef enum {
 
 typedef struct {
     LedgerModel  model;
-    UtxoSet      utxo;       /* used when model == MODEL_UTXO    */
-    AccountTable accounts;   /* used when model == MODEL_ACCOUNT */
+    UtxoSet      utxo;       /* UTXO model: the coins                       */
+    AccountTable accounts;   /* account model: balances + nonces + history;
+                                UTXO model: account nonces only            */
+    int          keep_history;
 } Ledger;
 
-void ledger_init(Ledger *ledger, LedgerModel model);
-void ledger_reset(Ledger *ledger);
-void ledger_free(Ledger *ledger);
+void   ledger_init(Ledger *ledger, LedgerModel model, int keep_history);
+void   ledger_free(Ledger *ledger);
+Status ledger_copy(Ledger *dst, const Ledger *src);
 
-/** Registers a member account with balance 0 (account model only). */
-Status ledger_add_account(Ledger *ledger, const char *id);
+/**
+ * Checks a new transfer / token fine against the ledger without applying
+ * it. Under the UTXO model, a transaction without inputs gets the sender's
+ * oldest spendable outputs selected (written back into *tx).
+ */
+Status ledger_check(const Ledger *ledger, Transaction *tx, char *err, size_t err_cap);
 
-/** Validates and applies one confirmed transaction under the active model. */
+/** Validates and applies a transaction. Nothing changes if it is invalid. */
 Status ledger_apply(Ledger *ledger, const Transaction *tx, const char *txid,
                     int block_index, char *err, size_t err_cap);
 
-long ledger_balance(const Ledger *ledger, const char *id);
-
+long        ledger_balance(const Ledger *ledger, const char *account);
+long        ledger_account_nonce(const Ledger *ledger, const char *account);
 const char *ledger_model_name(LedgerModel model);
-int         ledger_parse_model(const char *text, LedgerModel *model);
+int         ledger_parse_model(const char *text, LedgerModel *model);   /* 0 = ok */
 
 #endif /* LT_LEDGER_H */

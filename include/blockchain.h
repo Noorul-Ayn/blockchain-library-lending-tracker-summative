@@ -1,154 +1,132 @@
 /**
  * @file blockchain.h
- * @brief Blocks, the pending pool, proof-of-work and chain validation.
+ * @brief Blocks of lending records, proof-of-work and chain validation.
  *
- * Life of a block (Formative 2)
- * -----------------------------
- *  1. A lending action (borrow / return / overdue) or a token transfer is
- *     recorded as a block in the PENDING POOL. The librarian signs the
- *     record (ECDSA P-256) at this point; a return also carries a reward
- *     transaction whose SHA-256 hash is stored in tx_id.
- *  2. A miner takes the pending blocks in order, links each one to the
- *     chain tip (index, previous_hash) and searches for a nonce such that
- *        hash = SHA-256(header | nonce)
- *     starts with `difficulty` zero hex characters (proof-of-work).
- *  3. Only then is the block appended to the confirmed chain and its
- *     transaction applied to the members' balances.
+ * A block holds up to block_capacity records (fixed-size batches chosen by
+ * the miner from the top of the prioritised pending pool) and a header:
  *
- *  record payload (signed) : timestamp|book_id|book_title|member_id|
- *                            member_name|action|token_reward|tx_id|signed_by
- *  header (hashed)         : index|<record payload>|signature|previous_hash|
- *                            difficulty|mined_by|mined_at|nonce
+ *   index | timestamp | record_count | previous_hash | merkle_root |
+ *   sealed_by | token_reward | transaction_id | difficulty | nonce -> hash
+ *
+ * hash = SHA-256 of the header fields followed by the nonce. Proof-of-work
+ * requires the hash to start with `difficulty` hexadecimal zeros. Because
+ * the header contains the Merkle root of the records and the previous
+ * block's hash, changing any record or any earlier block changes this hash.
+ *
+ * transaction_id is the SHA-256 of the block's REWARD transaction, which is
+ * derived from the block's RETURNED records (10 coins on time, 5 late);
+ * token_reward is the total of those rewards (0 if the block has none).
  */
 #ifndef LT_BLOCKCHAIN_H
 #define LT_BLOCKCHAIN_H
 
+#include <stddef.h>
 #include <stdio.h>
 #include <time.h>
 
-#include "auth.h"
 #include "common.h"
-#include "keyring.h"
+#include "keystore.h"
+#include "record.h"
 #include "transaction.h"
 
-#define ACTION_GENESIS  "GENESIS"
-#define ACTION_BORROWED "BORROWED"
-#define ACTION_RETURNED "RETURNED"
-#define ACTION_OVERDUE  "OVERDUE"
-#define ACTION_TRANSFER "TRANSFER"
-
-/**
- * One block = one lending event or token transfer.
- * Fields marked F1 are unchanged from Formative 1; F2 fields are new.
- */
 typedef struct {
-    int           index;                         /* F1: position, 0 = genesis    */
-    time_t        timestamp;                     /* F1: when the action happened */
-    char          book_id[BOOK_ID_LEN];          /* F1 */
-    char          book_title[BOOK_TITLE_LEN];    /* F1 */
-    char          member_id[MEMBER_ID_LEN];      /* F1 */
-    char          member_name[MEMBER_NAME_LEN];  /* F1 */
-    char          action[ACTION_LEN];            /* F1 (+ TRANSFER in F2)        */
-    int           token_reward;                  /* F2: 10 on time, 5 late, 0    */
-    char          tx_id[HASH_HEX_LEN];           /* F2: SHA-256 of the tx (or 0s)*/
-    Transaction   tx;                            /* F2: the transaction itself   */
-    char          previous_hash[HASH_HEX_LEN];   /* F1 */
-    unsigned char signature[SIGNATURE_MAX_LEN];  /* F1: ECDSA over the record    */
-    size_t        signature_len;                 /* F1 */
-    char          signed_by[USERNAME_LEN];       /* F1 */
-    int           difficulty;                    /* F2: leading zeros required   */
-    unsigned long long nonce;                    /* F2: proof-of-work nonce      */
-    char          mined_by[MINER_ID_LEN];        /* F2: miner that confirmed it  */
-    time_t        mined_at;                      /* F2: confirmation time        */
-    char          hash[HASH_HEX_LEN];            /* F1: SHA-256 of the header    */
+    int                index;
+    time_t             timestamp;
+    size_t             record_count;
+    char               previous_hash[HASH_HEX_LEN];
+    char               merkle_root[HASH_HEX_LEN];
+    char               sealed_by[MINER_ID_LEN];
+    long               token_reward;
+    char               transaction_id[HASH_HEX_LEN];
+    Transaction        reward;          /* REWARD tx, or TX_NONE */
+    int                difficulty;
+    unsigned long long nonce;
+    char               hash[HASH_HEX_LEN];
+    Record            *records;         /* record_count entries, heap */
 } Block;
 
-/** A growable array of blocks: used for the chain and for the pending pool. */
 typedef struct {
     Block *blocks;
     size_t length;
     size_t capacity;
 } Blockchain;
 
-typedef enum {
-    SIG_NO_KEY  = -1,
-    SIG_INVALID =  0,
-    SIG_VALID   =  1
-} SigCheck;
-
+/** Result of validating one block. */
 typedef struct {
-    size_t blocks_checked;
-    size_t structure_errors;
-    size_t hash_errors;
-    size_t pow_errors;
-    size_t link_errors;
-    size_t tx_errors;
-    size_t signature_errors;
-    long   first_bad_index;
-} ValidationReport;
+    int    structure_ok, time_ok, merkle_ok, reward_ok, hash_ok, pow_ok, link_ok;
+    size_t bad_signatures, bad_records;
+    char   detail[256];               /* first problem found, "" if none */
+    char   computed_hash[HASH_HEX_LEN];
+    char   computed_merkle[HASH_HEX_LEN];
+} BlockCheck;
 
-/* ---- Array management -------------------------------------------------- */
-void         chain_init(Blockchain *chain);
-void         chain_free(Blockchain *chain);
-Status       chain_push(Blockchain *chain, const Block *block);
-void         chain_pop(Blockchain *chain, size_t count);
-void         chain_remove_at(Blockchain *chain, size_t index);
-const Block *chain_last(const Blockchain *chain);
+/** Summary of validating the whole chain. */
+typedef struct {
+    size_t blocks_checked, records_checked;
+    size_t structure_errors, time_errors, merkle_errors, reward_errors;
+    size_t hash_errors, pow_errors, link_errors, signature_errors, record_errors;
+    long   first_bad_index;           /* -1 if the chain is valid */
+} ChainReport;
 
-/* ---- Creating records -------------------------------------------------- */
+/* ---- Memory ------------------------------------------------------------- */
+void   block_init(Block *block);
+void   block_free(Block *block);
+Status block_copy(Block *dst, const Block *src);
+Status block_add_record(Block *block, const Record *rec);
+void   block_remove_record(Block *block, size_t index);
+
+void   chain_init(Blockchain *chain);
+void   chain_free(Blockchain *chain);
+Status chain_push(Blockchain *chain, Block *block);   /* takes ownership */
+void   chain_pop(Blockchain *chain);
+const Block *chain_tip(const Blockchain *chain);
+Status chain_copy(Blockchain *dst, const Blockchain *src);
+
+/* ---- Hashing and proof-of-work -------------------------------------------- */
+Status block_compute_merkle(const Block *block, char out[HASH_HEX_LEN]);
+Status block_build_reward(const Block *block, Transaction *reward, long *total);
+Status block_finalise_body(Block *block);   /* sets merkle root, reward, tx id */
+Status block_compute_hash(const Block *block, char out[HASH_HEX_LEN]);
+int    pow_hash_meets(const char *hash, int difficulty);
+
 /**
- * Builds and signs a new (unmined) record for the pending pool.
- * tx may be NULL for actions without a transaction (borrow, overdue).
- */
-Status block_create_record(Block *block, const Session *session,
-                           const char *book_id, const char *book_title,
-                           const char *member_id, const char *member_name,
-                           const char *action, int token_reward,
-                           const Transaction *tx);
-
-/** Links a pending record to the chain tip, ready for proof-of-work. */
-void block_prepare_for_mining(Block *block, const Blockchain *chain,
-                              int difficulty, const char *miner_id);
-
-/* ---- Proof-of-work ----------------------------------------------------- */
-/**
- * Tries nonces start, start+1, ... start+count-1. On success stores the
- * nonce and hash in the block, sets *found_offset and returns 1.
+ * Tries nonces start .. start+count-1. @return 1 when a valid nonce was
+ * found (block->nonce and block->hash set), 0 if none, -1 on error.
  * *attempts receives the number of hashes computed.
  */
 int pow_scan(Block *block, unsigned long long start, unsigned long long count,
              unsigned long long *attempts, unsigned long long *found_offset);
 
-/** Mines until a valid nonce is found. @return number of attempts. */
+/** Mines until the hash meets the difficulty. @return attempts (0 = error). */
 unsigned long long pow_mine(Block *block);
 
-/** True if the hex hash starts with `difficulty` '0' characters. */
-int pow_hash_meets(const char *hash, int difficulty);
+/** Prepares an empty block header on top of the chain tip. */
+void block_prepare(Block *block, const Blockchain *chain, int difficulty,
+                   const char *sealed_by, time_t now);
 
-/* ---- Hashing, signatures, validation ----------------------------------- */
-Status   block_compute_hash(const Block *block, char out[HASH_HEX_LEN]);
-SigCheck block_verify_signature(const Block *block, KeyRing *keys);
+/** Creates and mines block 0 (previous_hash = 64 zeros, no records). */
+Status chain_create_genesis(Blockchain *chain, int difficulty, time_t now);
 
-/** Checks tx_id, token_reward and the transaction against the action. */
-int block_tx_consistent(const Block *block, const char **why);
+/* ---- Validation ----------------------------------------------------------- */
 
-/** Creates, mines and appends block 0 (previous_hash = 64 zeros). */
-Status chain_create_genesis(Blockchain *chain, const Session *session, int difficulty);
+/** Field-level consistency of one record (rules that need no chain state). */
+int record_fields_valid(const Record *rec, const char **why);
+
+/** Validates block i of the chain (cryptography and structure). */
+void chain_check_block(const Blockchain *chain, size_t i, KeyDirectory *keys, BlockCheck *out);
 
 /**
- * Validates every block: structure, transaction integrity, SHA-256 hash,
- * proof-of-work, previous_hash link and ECDSA signature.
- * @return 1 if valid. A per-block report is written to log if non-NULL.
+ * Validates every block: structure, timestamps, Merkle root, reward
+ * transaction, header hash, proof-of-work, previous-hash links and the
+ * ECDSA signature of every record. Writes one line per block to log.
+ * @return 1 if every check passed.
  */
-int chain_validate(const Blockchain *chain, KeyRing *keys, FILE *log,
-                   ValidationReport *report);
+int chain_validate(const Blockchain *chain, KeyDirectory *keys, FILE *log, ChainReport *report);
 
-/* ---- Queries ----------------------------------------------------------- */
-const Block *chain_find_latest_event(const Blockchain *chain, const char *book_id);
-const Block *chain_find_latest_borrow(const Blockchain *chain, const char *book_id);
-long         chain_count_outgoing(const Blockchain *chain, const char *member_id);
-long         chain_count_rewards(const Blockchain *chain);
-int          action_is_lending(const char *action);
-int          action_is_valid(const char *action);
+/** Finds a record anywhere on the chain. */
+const Record *chain_find_record(const Blockchain *chain, const char *record_id,
+                                size_t *block_index, size_t *record_index);
+
+void zero_hash(char out[HASH_HEX_LEN]);
 
 #endif /* LT_BLOCKCHAIN_H */

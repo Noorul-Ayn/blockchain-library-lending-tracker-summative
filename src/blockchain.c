@@ -1,10 +1,9 @@
 /**
  * @file blockchain.c
- * @brief Block records, signing, proof-of-work hashing and chain validation.
+ * @brief Block memory management, Merkle roots, proof-of-work and validation.
  */
 #include "blockchain.h"
 
-#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,33 +11,77 @@
 #include <openssl/evp.h>
 
 #include "crypto.h"
+#include "merkle.h"
 #include "util.h"
 
-#define CHAIN_INITIAL_CAPACITY 16
-#define RECORD_PAYLOAD_MAX     512
-#define HEADER_PREFIX_MAX      (RECORD_PAYLOAD_MAX + SIGNATURE_MAX_LEN * 2 + 256)
-#define POW_CHUNK              (1ULL << 20)
+#define HEADER_TEXT_MAX 1024
+#define POW_CHUNK       100000ULL
 
-static void zero_hash(char out[HASH_HEX_LEN])
+void zero_hash(char out[HASH_HEX_LEN])
 {
     memset(out, '0', HASH_HEX_LEN - 1);
     out[HASH_HEX_LEN - 1] = '\0';
 }
 
-static int is_zero_hash(const char *h)
-{
-    size_t i;
+/* ------------------------------------------------------------------------ */
+/* Memory                                                                   */
+/* ------------------------------------------------------------------------ */
 
-    for (i = 0; i < HASH_HEX_LEN - 1; i++) {
-        if (h[i] != '0')
-            return 0;
-    }
-    return h[HASH_HEX_LEN - 1] == '\0';
+void block_init(Block *block)
+{
+    memset(block, 0, sizeof *block);
+    tx_clear(&block->reward);
+    zero_hash(block->previous_hash);
+    zero_hash(block->merkle_root);
+    zero_hash(block->transaction_id);
+    zero_hash(block->hash);
+    strcpy(block->sealed_by, "-");
 }
 
-/* ------------------------------------------------------------------------ */
-/* Dynamic array management                                                 */
-/* ------------------------------------------------------------------------ */
+void block_free(Block *block)
+{
+    free(block->records);
+    block->records = NULL;
+    block->record_count = 0;
+}
+
+Status block_copy(Block *dst, const Block *src)
+{
+    *dst = *src;
+    dst->records = NULL;
+    if (src->record_count == 0)
+        return LT_OK;
+    dst->records = malloc(src->record_count * sizeof *dst->records);
+    if (dst->records == NULL) {
+        dst->record_count = 0;
+        return LT_ERR_MEMORY;
+    }
+    memcpy(dst->records, src->records, src->record_count * sizeof *dst->records);
+    return LT_OK;
+}
+
+Status block_add_record(Block *block, const Record *rec)
+{
+    Record *grown;
+
+    if (block->record_count >= MAX_BLOCK_CAPACITY)
+        return LT_ERR_LIMIT;
+    grown = realloc(block->records, (block->record_count + 1) * sizeof *grown);
+    if (grown == NULL)
+        return LT_ERR_MEMORY;
+    block->records = grown;
+    block->records[block->record_count++] = *rec;
+    return LT_OK;
+}
+
+void block_remove_record(Block *block, size_t index)
+{
+    if (index >= block->record_count)
+        return;
+    memmove(&block->records[index], &block->records[index + 1],
+            (block->record_count - index - 1) * sizeof *block->records);
+    block->record_count--;
+}
 
 void chain_init(Blockchain *chain)
 {
@@ -49,14 +92,18 @@ void chain_init(Blockchain *chain)
 
 void chain_free(Blockchain *chain)
 {
+    size_t i;
+
+    for (i = 0; i < chain->length; i++)
+        block_free(&chain->blocks[i]);
     free(chain->blocks);
     chain_init(chain);
 }
 
-Status chain_push(Blockchain *chain, const Block *block)
+Status chain_push(Blockchain *chain, Block *block)
 {
     if (chain->length == chain->capacity) {
-        size_t new_cap = chain->capacity ? chain->capacity * 2 : CHAIN_INITIAL_CAPACITY;
+        size_t new_cap = chain->capacity ? chain->capacity * 2 : 16;
         Block *grown;
 
         if (new_cap > SIZE_MAX / sizeof *grown)
@@ -67,73 +114,120 @@ Status chain_push(Blockchain *chain, const Block *block)
         chain->blocks = grown;
         chain->capacity = new_cap;
     }
-    chain->blocks[chain->length++] = *block;
+    chain->blocks[chain->length++] = *block;   /* ownership of records moves */
+    block->records = NULL;
+    block->record_count = 0;
     return LT_OK;
 }
 
-void chain_pop(Blockchain *chain, size_t count)
+void chain_pop(Blockchain *chain)
 {
-    chain->length = (count > chain->length) ? 0 : chain->length - count;
+    if (chain->length > 0)
+        block_free(&chain->blocks[--chain->length]);
 }
 
-void chain_remove_at(Blockchain *chain, size_t index)
-{
-    if (index >= chain->length)
-        return;
-    memmove(&chain->blocks[index], &chain->blocks[index + 1],
-            (chain->length - index - 1) * sizeof *chain->blocks);
-    chain->length--;
-}
-
-const Block *chain_last(const Blockchain *chain)
+const Block *chain_tip(const Blockchain *chain)
 {
     return chain->length ? &chain->blocks[chain->length - 1] : NULL;
 }
 
-int action_is_lending(const char *action)
+Status chain_copy(Blockchain *dst, const Blockchain *src)
 {
-    return strcmp(action, ACTION_BORROWED) == 0 ||
-           strcmp(action, ACTION_RETURNED) == 0 ||
-           strcmp(action, ACTION_OVERDUE) == 0;
-}
+    size_t i;
 
-int action_is_valid(const char *action)
-{
-    return action_is_lending(action) || strcmp(action, ACTION_TRANSFER) == 0;
+    chain_init(dst);
+    for (i = 0; i < src->length; i++) {
+        Block copy;
+        Status st = block_copy(&copy, &src->blocks[i]);
+        if (st == LT_OK)
+            st = chain_push(dst, &copy);
+        if (st != LT_OK) {
+            block_free(&copy);
+            chain_free(dst);
+            return st;
+        }
+    }
+    return LT_OK;
 }
 
 /* ------------------------------------------------------------------------ */
-/* Serialisation used for signing and hashing                               */
+/* Merkle root and reward transaction                                       */
 /* ------------------------------------------------------------------------ */
 
-/** The part of the block that the librarian signs when the action happens. */
-static int record_payload(const Block *b, char *buf, size_t cap)
+Status block_compute_merkle(const Block *block, char out[HASH_HEX_LEN])
 {
-    int n = snprintf(buf, cap, "%lld|%s|%s|%s|%s|%s|%d|%s|%s",
-                     (long long)b->timestamp, b->book_id, b->book_title, b->member_id,
-                     b->member_name, b->action, b->token_reward, b->tx_id, b->signed_by);
-    return (n < 0 || (size_t)n >= cap) ? -1 : n;
+    char (*leaves)[HASH_HEX_LEN];
+    size_t i;
+    Status st = LT_OK;
+
+    if (block->record_count == 0)
+        return merkle_root(NULL, 0, out);
+    leaves = malloc(block->record_count * sizeof *leaves);
+    if (leaves == NULL)
+        return LT_ERR_MEMORY;
+    for (i = 0; i < block->record_count && st == LT_OK; i++)
+        st = record_hash(&block->records[i], leaves[i]);
+    if (st == LT_OK)
+        st = merkle_root((const char (*)[HASH_HEX_LEN])leaves, block->record_count, out);
+    free(leaves);
+    return st;
 }
+
+/** The reward is a pure function of the block's RETURNED records. */
+Status block_build_reward(const Block *block, Transaction *reward, long *total)
+{
+    size_t i;
+    Status st = LT_OK;
+
+    tx_clear(reward);
+    *total = 0;
+    for (i = 0; i < block->record_count && st == LT_OK; i++) {
+        const Record *r = &block->records[i];
+
+        if (r->action != ACT_RETURN)
+            continue;
+        if (reward->type == TX_NONE)
+            tx_make_reward(reward, block->index, block->timestamp);
+        st = tx_add_reward_output(reward, r->member_id, r->token_reward, r->record_id);
+        *total += r->token_reward;
+    }
+    return st;
+}
+
+Status block_finalise_body(Block *block)
+{
+    Status st;
+
+    st = block_compute_merkle(block, block->merkle_root);
+    if (st == LT_OK)
+        st = block_build_reward(block, &block->reward, &block->token_reward);
+    if (st == LT_OK) {
+        if (block->reward.type == TX_NONE)
+            zero_hash(block->transaction_id);
+        else
+            st = tx_compute_id(&block->reward, block->transaction_id);
+    }
+    return st;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Header hash and proof-of-work                                            */
+/* ------------------------------------------------------------------------ */
 
 /** Everything that is hashed except the nonce (which is appended last). */
 static int header_prefix(const Block *b, char *buf, size_t cap)
 {
-    char record[RECORD_PAYLOAD_MAX];
-    char sig_hex[SIGNATURE_MAX_LEN * 2 + 1];
-    int n;
-
-    if (b->signature_len > SIGNATURE_MAX_LEN || record_payload(b, record, sizeof record) < 0)
-        return -1;
-    hex_encode(b->signature, b->signature_len, sig_hex);
-    n = snprintf(buf, cap, "%d|%s|%s|%s|%d|%s|%lld|", b->index, record, sig_hex,
-                 b->previous_hash, b->difficulty, b->mined_by, (long long)b->mined_at);
+    int n = snprintf(buf, cap, "%d|%lld|%zu|%s|%s|%s|%ld|%s|%d|", b->index,
+                     (long long)b->timestamp, b->record_count, b->previous_hash,
+                     b->merkle_root, b->sealed_by, b->token_reward, b->transaction_id,
+                     b->difficulty);
     return (n < 0 || (size_t)n >= cap) ? -1 : n;
 }
 
 Status block_compute_hash(const Block *block, char out[HASH_HEX_LEN])
 {
-    char buf[HEADER_PREFIX_MAX + 32];
-    int n = header_prefix(block, buf, HEADER_PREFIX_MAX);
+    char buf[HEADER_TEXT_MAX + 32];
+    int n = header_prefix(block, buf, HEADER_TEXT_MAX);
     int m;
 
     if (n < 0)
@@ -143,25 +237,6 @@ Status block_compute_hash(const Block *block, char out[HASH_HEX_LEN])
         return LT_ERR_FORMAT;
     return crypto_sha256_hex(buf, (size_t)n + (size_t)m, out);
 }
-
-SigCheck block_verify_signature(const Block *block, KeyRing *keys)
-{
-    char payload[RECORD_PAYLOAD_MAX];
-    int n = record_payload(block, payload, sizeof payload);
-    EVP_PKEY *key;
-
-    if (n < 0 || block->signature_len == 0 || block->signature_len > SIGNATURE_MAX_LEN)
-        return SIG_INVALID;
-    key = keyring_get(keys, block->signed_by);
-    if (key == NULL)
-        return SIG_NO_KEY;
-    return crypto_verify(key, payload, (size_t)n, block->signature, block->signature_len)
-               ? SIG_VALID : SIG_INVALID;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Proof-of-work                                                            */
-/* ------------------------------------------------------------------------ */
 
 /** Leading-zero test on the raw 32-byte digest (2 hex chars per byte). */
 static int digest_meets(const unsigned char *d, int difficulty)
@@ -191,7 +266,7 @@ int pow_hash_meets(const char *hash, int difficulty)
 int pow_scan(Block *block, unsigned long long start, unsigned long long count,
              unsigned long long *attempts, unsigned long long *found_offset)
 {
-    char prefix[HEADER_PREFIX_MAX];
+    char prefix[HEADER_TEXT_MAX];
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int digest_len = 0;
     EVP_MD_CTX *base = NULL, *work = NULL;
@@ -253,270 +328,287 @@ unsigned long long pow_mine(Block *block)
     }
 }
 
-/* ------------------------------------------------------------------------ */
-/* Creating records                                                         */
-/* ------------------------------------------------------------------------ */
-
-Status block_create_record(Block *block, const Session *session,
-                           const char *book_id, const char *book_title,
-                           const char *member_id, const char *member_name,
-                           const char *action, int token_reward,
-                           const Transaction *tx)
+void block_prepare(Block *block, const Blockchain *chain, int difficulty,
+                   const char *sealed_by, time_t now)
 {
-    char payload[RECORD_PAYLOAD_MAX];
-    int n;
-    Status st;
-
-    memset(block, 0, sizeof *block);
-    if (!auth_is_logged_in(session))
-        return LT_ERR_DENIED;
-
-    block->index = -1;                          /* not on the chain yet */
-    block->timestamp = time(NULL);
-    if (!str_is_safe_field(book_id) || !str_is_safe_field(book_title) ||
-        !str_is_safe_field(member_id) || !str_is_safe_field(member_name) ||
-        str_copy(block->book_id, sizeof block->book_id, book_id) != 0 ||
-        str_copy(block->book_title, sizeof block->book_title, book_title) != 0 ||
-        str_copy(block->member_id, sizeof block->member_id, member_id) != 0 ||
-        str_copy(block->member_name, sizeof block->member_name, member_name) != 0 ||
-        str_copy(block->action, sizeof block->action, action) != 0 ||
-        str_copy(block->signed_by, sizeof block->signed_by, session->username) != 0)
-        return LT_ERR_INPUT;
-    block->token_reward = token_reward;
-
-    if (tx != NULL && tx->type != TX_NONE) {
-        block->tx = *tx;
-        st = tx_compute_id(&block->tx, block->tx_id);
-        if (st != LT_OK)
-            return st;
-    } else {
-        tx_clear(&block->tx);
-        zero_hash(block->tx_id);
-    }
-
-    zero_hash(block->previous_hash);
-    zero_hash(block->hash);
-    (void)str_copy(block->mined_by, sizeof block->mined_by, "-");
-
-    n = record_payload(block, payload, sizeof payload);
-    if (n < 0)
-        return LT_ERR_FORMAT;
-    block->signature_len = sizeof block->signature;
-    return crypto_sign(session->signing_key, payload, (size_t)n,
-                       block->signature, &block->signature_len);
-}
-
-void block_prepare_for_mining(Block *block, const Blockchain *chain,
-                              int difficulty, const char *miner_id)
-{
-    const Block *tip = chain_last(chain);
+    const Block *tip = chain_tip(chain);
 
     block->index = (int)chain->length;
     if (tip != NULL)
         (void)str_copy(block->previous_hash, sizeof block->previous_hash, tip->hash);
     else
         zero_hash(block->previous_hash);
+    /* Block timestamps must strictly increase. */
+    block->timestamp = (tip != NULL && now <= tip->timestamp) ? tip->timestamp + 1 : now;
     block->difficulty = difficulty;
-    (void)str_copy(block->mined_by, sizeof block->mined_by, miner_id);
-    block->mined_at = time(NULL);
+    (void)str_copy(block->sealed_by, sizeof block->sealed_by, sealed_by);
     block->nonce = 0;
-    block->hash[0] = '\0';
+    zero_hash(block->hash);
 }
 
-Status chain_create_genesis(Blockchain *chain, const Session *session, int difficulty)
+Status chain_create_genesis(Blockchain *chain, int difficulty, time_t now)
 {
     Block block;
     Status st;
 
     if (chain->length != 0)
         return LT_ERR_EXISTS;
-    st = block_create_record(&block, session, "GENESIS", "Genesis Block", "SYSTEM",
-                             "Library Lending Ledger", ACTION_GENESIS, 0, NULL);
-    if (st != LT_OK)
-        return st;
-    block_prepare_for_mining(&block, chain, difficulty, "GENESIS");
-    if (pow_mine(&block) == 0)
-        return LT_ERR_CRYPTO;
-    return chain_push(chain, &block);
+    block_init(&block);
+    block_prepare(&block, chain, difficulty, "GENESIS", now);
+    st = block_finalise_body(&block);
+    if (st == LT_OK && pow_mine(&block) == 0)
+        st = LT_ERR_CRYPTO;
+    if (st == LT_OK)
+        st = chain_push(chain, &block);
+    block_free(&block);
+    return st;
 }
 
 /* ------------------------------------------------------------------------ */
 /* Validation                                                               */
 /* ------------------------------------------------------------------------ */
 
-int block_tx_consistent(const Block *b, const char **why)
+static int is_dash(const char *s)
 {
-    char computed[HASH_HEX_LEN];
-    const Transaction *tx = &b->tx;
-
-    if (strcmp(b->action, ACTION_RETURNED) == 0) {
-        if (tx->type != TX_REWARD) { *why = "RETURNED block without a reward transaction"; return 0; }
-        if (b->token_reward != REWARD_ON_TIME && b->token_reward != REWARD_LATE) {
-            *why = "token_reward must be 10 (on time) or 5 (late)"; return 0;
-        }
-        if (tx->amount != b->token_reward || strcmp(tx->to, b->member_id) != 0 ||
-            strcmp(tx->from, LIBRARY_ACCOUNT) != 0 || tx->fee != TX_FEE ||
-            strcmp(tx->ref, b->book_id) != 0) {
-            *why = "reward transaction does not match the block"; return 0;
-        }
-    } else if (strcmp(b->action, ACTION_TRANSFER) == 0) {
-        if (tx->type != TX_TRANSFER || b->token_reward != 0 ||
-            strcmp(tx->from, b->member_id) != 0 || strcmp(tx->from, tx->to) == 0 ||
-            tx->amount < 1 || tx->fee != TX_FEE) {
-            *why = "transfer transaction does not match the block"; return 0;
-        }
-    } else {
-        if (tx->type != TX_NONE || b->token_reward != 0 || !is_zero_hash(b->tx_id)) {
-            *why = "this action must not carry a transaction or reward"; return 0;
-        }
-        return 1;
-    }
-    if (tx_compute_id(tx, computed) != LT_OK || strcmp(computed, b->tx_id) != 0) {
-        *why = "tx_id is not the SHA-256 hash of the transaction";
-        return 0;
-    }
-    return 1;
+    return strcmp(s, "-") == 0;
 }
 
-static void log_block_result(FILE *log, const Block *b, size_t position, int ok,
-                             int structure_ok, int tx_ok, const char *tx_why, int hash_ok,
-                             int pow_ok, int link_ok, SigCheck sig, const char *computed,
-                             const char *expected_prev)
+int record_fields_valid(const Record *rec, const char **why)
 {
-    const char *sig_text = sig == SIG_VALID ? "VALID" : sig == SIG_NO_KEY ? "NO KEY" : "INVALID";
+    int late = rec->due_date > 0 && rec->timestamp > rec->due_date;
+    long late_fine = late ? days_between_ceil(rec->due_date, rec->timestamp) * FINE_PER_DAY
+                          : 0;
+    int member_signed = strcmp(rec->signer_id, rec->member_id) == 0;
+    int staff_signed = signer_is_staff(rec->signer_id);
 
-    fprintf(log, "  Block #%-3zu %s%-10s%s hash %s%s%s | PoW %s%s%s (d=%d) | link %s%s%s"
-                 " | tx %s%s%s | sig %s%s%s (%s)\n",
-            position,
-            clr(ok ? CLR_GREEN : CLR_RED), ok ? "[OK]" : "[TAMPERED]", clr(CLR_RESET),
-            clr(hash_ok ? CLR_GREEN : CLR_RED), hash_ok ? "OK" : "MISMATCH", clr(CLR_RESET),
-            clr(pow_ok ? CLR_GREEN : CLR_RED), pow_ok ? "OK" : "FAIL", clr(CLR_RESET),
-            b->difficulty,
-            clr(link_ok ? CLR_GREEN : CLR_RED), link_ok ? "OK" : "BROKEN", clr(CLR_RESET),
-            clr(tx_ok ? CLR_GREEN : CLR_RED), tx_ok ? "OK" : "BAD", clr(CLR_RESET),
-            clr(sig == SIG_VALID ? CLR_GREEN : CLR_RED), sig_text, clr(CLR_RESET),
-            b->signed_by[0] ? b->signed_by : "?");
-    if (!structure_ok)
-        fprintf(log, "              structure    : index %d / action '%s' not valid here\n",
-                b->index, b->action);
-    if (!tx_ok)
-        fprintf(log, "              transaction  : %s\n", tx_why);
-    if (!hash_ok) {
-        fprintf(log, "              stored hash  : %s\n", b->hash);
-        fprintf(log, "              computed hash: %s\n", computed[0] ? computed : "(error)");
+    *why = NULL;
+    switch (rec->action) {
+    case ACT_BORROW:
+        if (is_dash(rec->copy_id) || is_dash(rec->book_id) || is_dash(rec->member_id))
+            *why = "BORROWED record without a copy or member";
+        else if (rec->due_date <= rec->timestamp)
+            *why = "due date is not after the borrow time";
+        else if (rec->fine_amount != 0 || rec->token_reward != 0 || rec->tx.type != TX_NONE)
+            *why = "BORROWED record must not carry a fine, reward or transaction";
+        else if (!member_signed)
+            *why = "BORROWED record must be signed by the member";
+        break;
+    case ACT_RETURN:
+        if (is_dash(rec->copy_id) || rec->due_date == 0)
+            *why = "RETURNED record without a copy or due date";
+        else if (rec->token_reward != (late ? REWARD_LATE : REWARD_ON_TIME))
+            *why = "token_reward must be 10 (on time) or 5 (late)";
+        else if (rec->fine_amount != late_fine)
+            *why = "fine_amount does not match the days late";
+        else if (rec->tx.type != TX_NONE || rec->condition == COND_LOST)
+            *why = "RETURNED record has an invalid transaction or condition";
+        else if (!member_signed)
+            *why = "RETURNED record must be signed by the member";
+        break;
+    case ACT_RESERVE:
+        if (is_dash(rec->book_id) || !is_dash(rec->copy_id))
+            *why = "RESERVED record must name a title and no copy";
+        else if (rec->fine_amount != 0 || rec->token_reward != 0 || rec->tx.type != TX_NONE)
+            *why = "RESERVED record must not carry a fine, reward or transaction";
+        else if (!member_signed)
+            *why = "RESERVED record must be signed by the member";
+        break;
+    case ACT_RENEW:
+        if (is_dash(rec->copy_id) || rec->due_date <= rec->timestamp)
+            *why = "RENEWED record needs a copy and a future due date";
+        else if (rec->fine_amount != 0 || rec->token_reward != 0 || rec->tx.type != TX_NONE)
+            *why = "RENEWED record must not carry a fine, reward or transaction";
+        else if (!member_signed)
+            *why = "RENEWED record must be signed by the member";
+        break;
+    case ACT_OVERDUE:
+        if (is_dash(rec->copy_id) || !late)
+            *why = "OVERDUE record for a copy that was not past its due date";
+        else if (rec->fine_amount != late_fine)
+            *why = "fine_amount does not match the days overdue";
+        else if (rec->token_reward != 0 || rec->tx.type != TX_NONE)
+            *why = "OVERDUE record must not carry a reward or transaction";
+        else if (!staff_signed)
+            *why = "OVERDUE record must be signed by a librarian";
+        break;
+    case ACT_LOST:
+        if (is_dash(rec->copy_id) || is_dash(rec->reason) || rec->condition != COND_LOST)
+            *why = "LOST record needs a copy, a reason code and condition LOST";
+        else if (rec->fine_amount != 0 || rec->token_reward != 0 || rec->tx.type != TX_NONE)
+            *why = "LOST record must not carry a fine, reward or transaction";
+        else if (!staff_signed)
+            *why = "LOST record must be signed by a librarian";
+        break;
+    case ACT_TRANSFER:
+        if (rec->tx.type != TX_TRANSFER || strcmp(rec->tx.from, rec->member_id) != 0 ||
+            strcmp(rec->tx.to, rec->tx.from) == 0 || rec->tx.amount <= 0 ||
+            rec->tx.fee != TX_FEE)
+            *why = "TRANSFER record has an invalid transaction";
+        else if (!member_signed)
+            *why = "TRANSFER record must be signed by the sender";
+        break;
+    case ACT_FINE:
+        if (rec->tx.type != TX_FINE || strcmp(rec->tx.from, rec->member_id) != 0 ||
+            rec->tx.amount <= 0)
+            *why = "FINE_PAID record has an invalid transaction";
+        else if (tx_moves_tokens(&rec->tx) ? (!member_signed || rec->tx.fee != TX_FEE)
+                                           : (!staff_signed || rec->tx.fee != 0))
+            *why = "token fines are signed by the member, cash fines by a librarian";
+        break;
+    case ACT_NONE:
+        *why = "unknown action";
+        break;
     }
-    if (hash_ok && !pow_ok)
-        fprintf(log, "              proof-of-work: hash does not start with %d zero(s)\n",
-                b->difficulty);
-    if (!link_ok) {
-        fprintf(log, "              previous_hash: %s\n", b->previous_hash);
-        fprintf(log, "              expected     : %s\n", expected_prev);
+    if (*why == NULL && rec->tx.type != TX_NONE && rec->tx.timestamp != rec->timestamp)
+        *why = "transaction timestamp differs from the record";
+    return *why == NULL;
+}
+
+void chain_check_block(const Blockchain *chain, size_t i, KeyDirectory *keys, BlockCheck *out)
+{
+    const Block *b = &chain->blocks[i];
+    char expected_prev[HASH_HEX_LEN], reward_id[HASH_HEX_LEN];
+    Transaction reward;
+    long total = 0;
+    size_t r;
+
+    memset(out, 0, sizeof *out);
+    out->time_ok = 1;
+
+    /* Structure: position, genesis rules, record count. */
+    out->structure_ok = b->index == (int)i && b->record_count <= MAX_BLOCK_CAPACITY &&
+                        (i != 0 || (b->record_count == 0 && strcmp(b->sealed_by, "GENESIS") == 0));
+    if (!out->structure_ok)
+        snprintf(out->detail, sizeof out->detail, "index %d / record count %zu not valid here",
+                 b->index, b->record_count);
+
+    /* Timestamps strictly increase from block to block. */
+    if (i > 0 && b->timestamp <= chain->blocks[i - 1].timestamp) {
+        out->time_ok = 0;
+        if (out->detail[0] == '\0')
+            snprintf(out->detail, sizeof out->detail,
+                     "timestamp is not later than the previous block's");
+    }
+
+    /* Merkle root recomputed from the records. */
+    if (block_compute_merkle(b, out->computed_merkle) == LT_OK)
+        out->merkle_ok = strcmp(out->computed_merkle, b->merkle_root) == 0;
+    if (!out->merkle_ok && out->detail[0] == '\0')
+        snprintf(out->detail, sizeof out->detail, "Merkle root mismatch: records changed");
+
+    /* Reward transaction rebuilt from the RETURNED records. */
+    if (block_build_reward(b, &reward, &total) == LT_OK) {
+        if (reward.type == TX_NONE)
+            zero_hash(reward_id);
+        else if (tx_compute_id(&reward, reward_id) != LT_OK)
+            reward_id[0] = '\0';
+        out->reward_ok = total == b->token_reward && strcmp(reward_id, b->transaction_id) == 0;
+    }
+    if (!out->reward_ok && out->detail[0] == '\0')
+        snprintf(out->detail, sizeof out->detail,
+                 "token_reward / transaction_id do not match the block's returns");
+
+    /* Header hash, proof-of-work and link. */
+    if (block_compute_hash(b, out->computed_hash) == LT_OK)
+        out->hash_ok = strcmp(out->computed_hash, b->hash) == 0;
+    out->pow_ok = pow_hash_meets(b->hash, b->difficulty);
+    if (i == 0)
+        zero_hash(expected_prev);
+    else
+        (void)str_copy(expected_prev, sizeof expected_prev, chain->blocks[i - 1].hash);
+    out->link_ok = strcmp(b->previous_hash, expected_prev) == 0;
+    if (!out->hash_ok && out->detail[0] == '\0')
+        snprintf(out->detail, sizeof out->detail, "stored hash %.16s... != computed %.16s...",
+                 b->hash, out->computed_hash);
+    if (!out->link_ok && out->detail[0] == '\0')
+        snprintf(out->detail, sizeof out->detail, "previous_hash %.16s... != %.16s...",
+                 b->previous_hash, expected_prev);
+
+    /* Every record: ECDSA signature and field consistency. */
+    for (r = 0; r < b->record_count; r++) {
+        const Record *rec = &b->records[r];
+        const char *why = NULL;
+        SigCheck sig = record_verify(rec, keys);
+
+        if (sig != SIG_VALID) {
+            out->bad_signatures++;
+            if (out->detail[0] == '\0')
+                snprintf(out->detail, sizeof out->detail, "record %zu (%s, %s) signature %s",
+                         r + 1, rec->record_id, action_record_name(rec->action),
+                         sig_check_name(sig));
+        }
+        if (!record_fields_valid(rec, &why) || rec->timestamp > b->timestamp) {
+            out->bad_records++;
+            if (out->detail[0] == '\0')
+                snprintf(out->detail, sizeof out->detail, "record %zu (%s): %s", r + 1,
+                         rec->record_id, why ? why : "record is newer than its block");
+        }
     }
 }
 
-int chain_validate(const Blockchain *chain, KeyRing *keys, FILE *log, ValidationReport *report)
+int chain_validate(const Blockchain *chain, KeyDirectory *keys, FILE *log, ChainReport *report)
 {
-    ValidationReport r;
-    char zero[HASH_HEX_LEN];
     size_t i;
 
-    memset(&r, 0, sizeof r);
-    r.first_bad_index = -1;
-    zero_hash(zero);
-
+    memset(report, 0, sizeof *report);
+    report->first_bad_index = -1;
     if (chain->length == 0) {
-        r.structure_errors++;
+        report->structure_errors = 1;
+        report->first_bad_index = 0;
         if (log != NULL)
-            fprintf(log, "  The chain is empty - the genesis block is missing.\n");
+            fprintf(log, "  The chain is empty: there is no genesis block.\n");
+        return 0;
     }
     for (i = 0; i < chain->length; i++) {
         const Block *b = &chain->blocks[i];
-        const char *expected_prev = (i == 0) ? zero : chain->blocks[i - 1].hash;
-        const char *tx_why = "";
-        char computed[HASH_HEX_LEN] = "";
-        int structure_ok, tx_ok, hash_ok, pow_ok, link_ok, ok;
-        SigCheck sig;
+        BlockCheck c;
+        int ok;
 
-        structure_ok = b->index >= 0 && (size_t)b->index == i &&
-                       (i == 0 ? strcmp(b->action, ACTION_GENESIS) == 0
-                               : action_is_valid(b->action));
-        tx_ok = (i == 0) ? (b->tx.type == TX_NONE && is_zero_hash(b->tx_id))
-                         : block_tx_consistent(b, &tx_why);
-        if (i == 0 && !tx_ok)
-            tx_why = "the genesis block must not carry a transaction";
-        hash_ok = block_compute_hash(b, computed) == LT_OK && strcmp(computed, b->hash) == 0;
-        pow_ok = pow_hash_meets(b->hash, b->difficulty);
-        link_ok = strcmp(b->previous_hash, expected_prev) == 0;
-        sig = block_verify_signature(b, keys);
-        ok = structure_ok && tx_ok && hash_ok && pow_ok && link_ok && sig == SIG_VALID;
-
-        r.blocks_checked++;
-        if (!structure_ok) r.structure_errors++;
-        if (!tx_ok)        r.tx_errors++;
-        if (!hash_ok)      r.hash_errors++;
-        if (!pow_ok)       r.pow_errors++;
-        if (!link_ok)      r.link_errors++;
-        if (sig != SIG_VALID) r.signature_errors++;
-        if (!ok && r.first_bad_index < 0)
-            r.first_bad_index = (long)i;
-        if (log != NULL)
-            log_block_result(log, b, i, ok, structure_ok, tx_ok, tx_why, hash_ok, pow_ok,
-                             link_ok, sig, computed, expected_prev);
+        chain_check_block(chain, i, keys, &c);
+        ok = c.structure_ok && c.time_ok && c.merkle_ok && c.reward_ok && c.hash_ok &&
+             c.pow_ok && c.link_ok && c.bad_signatures == 0 && c.bad_records == 0;
+        report->blocks_checked++;
+        report->records_checked += b->record_count;
+        report->structure_errors += !c.structure_ok;
+        report->time_errors += !c.time_ok;
+        report->merkle_errors += !c.merkle_ok;
+        report->reward_errors += !c.reward_ok;
+        report->hash_errors += !c.hash_ok;
+        report->pow_errors += !c.pow_ok;
+        report->link_errors += !c.link_ok;
+        report->signature_errors += c.bad_signatures;
+        report->record_errors += c.bad_records;
+        if (!ok && report->first_bad_index < 0)
+            report->first_bad_index = (long)i;
+        if (log != NULL) {
+            fprintf(log, "  Block #%-3zu %s%-10s%s hash %s | PoW %s (d=%d) | link %s | "
+                         "merkle %s | signatures %zu/%zu valid\n",
+                    i, ok ? clr(CLR_GREEN) : clr(CLR_RED), ok ? "[OK]" : "[TAMPERED]",
+                    clr(CLR_RESET), c.hash_ok ? "OK" : "MISMATCH", c.pow_ok ? "OK" : "FAIL",
+                    b->difficulty, c.link_ok ? "OK" : "BROKEN", c.merkle_ok ? "OK" : "MISMATCH",
+                    b->record_count - c.bad_signatures, b->record_count);
+            if (!ok)
+                fprintf(log, "              %s%s%s\n", clr(CLR_YELLOW), c.detail, clr(CLR_RESET));
+        }
     }
-    if (report != NULL)
-        *report = r;
-    return r.structure_errors == 0 && r.first_bad_index < 0;
+    return report->first_bad_index < 0;
 }
 
-/* ------------------------------------------------------------------------ */
-/* Queries                                                                  */
-/* ------------------------------------------------------------------------ */
-
-const Block *chain_find_latest_event(const Blockchain *chain, const char *book_id)
+const Record *chain_find_record(const Blockchain *chain, const char *record_id,
+                                size_t *block_index, size_t *record_index)
 {
-    size_t i = chain->length;
-
-    while (i > 0) {
-        const Block *b = &chain->blocks[--i];
-        if (action_is_lending(b->action) && strcmp(b->book_id, book_id) == 0)
-            return b;
-    }
-    return NULL;
-}
-
-const Block *chain_find_latest_borrow(const Blockchain *chain, const char *book_id)
-{
-    size_t i = chain->length;
-
-    while (i > 0) {
-        const Block *b = &chain->blocks[--i];
-        if (strcmp(b->action, ACTION_BORROWED) == 0 && strcmp(b->book_id, book_id) == 0)
-            return b;
-    }
-    return NULL;
-}
-
-long chain_count_outgoing(const Blockchain *chain, const char *member_id)
-{
-    long n = 0;
-    size_t i;
+    size_t i, r;
 
     for (i = 0; i < chain->length; i++) {
-        const Transaction *tx = &chain->blocks[i].tx;
-        if (tx->type == TX_TRANSFER && strcmp(tx->from, member_id) == 0)
-            n++;
+        for (r = 0; r < chain->blocks[i].record_count; r++) {
+            if (strcmp(chain->blocks[i].records[r].record_id, record_id) == 0) {
+                if (block_index != NULL)
+                    *block_index = i;
+                if (record_index != NULL)
+                    *record_index = r;
+                return &chain->blocks[i].records[r];
+            }
+        }
     }
-    return n;
-}
-
-long chain_count_rewards(const Blockchain *chain)
-{
-    long n = 0;
-    size_t i;
-
-    for (i = 0; i < chain->length; i++) {
-        if (chain->blocks[i].tx.type == TX_REWARD)
-            n++;
-    }
-    return n;
+    return NULL;
 }
